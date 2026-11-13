@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: inventario-valvulas
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_SSL_CA
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: INITIAL_ADMIN_NAME
+        value: Erick Abad Monserrate
+      - key: INITIAL_ADMIN_BARCODE
+        value: "0987654321"
+      - key: INITIAL_ADMIN_PASSWORD
+        sync: false
