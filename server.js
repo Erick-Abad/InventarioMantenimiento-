@@ -1,6 +1,7 @@
 require('dotenv').config();
-const express=require('express');const helmet=require('helmet');const rateLimit=require('express-rate-limit');const jwt=require('jsonwebtoken');const bcrypt=require('bcryptjs');const crypto=require('crypto');const ExcelJS=require('exceljs');const path=require('path');const {pool}=require('./storage');
+const express=require('express');const helmet=require('helmet');const rateLimit=require('express-rate-limit');const jwt=require('jsonwebtoken');const bcrypt=require('bcryptjs');const crypto=require('crypto');const ExcelJS=require('exceljs');const path=require('path');const {pool}=require('./storage');const {searchProducts}=require('./product-search');
 const app=express();app.disable('x-powered-by');app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'32kb'}));app.use(express.static(path.join(__dirname,'public')));
+app.use('/vendor/zxing',express.static(path.join(__dirname,'node_modules','@zxing','browser','umd'),{index:false,maxAge:'1d'}));
 const safe=(f)=>(req,res,next)=>Promise.resolve(f(req,res,next)).catch(next);
 const bad=(res,msg,code=400)=>res.status(code).json({error:msg});
 const auth=(req,res,next)=>{try{const t=(req.headers.authorization||'').replace(/^Bearer /,'');req.user=jwt.verify(t,process.env.JWT_SECRET,{algorithms:['HS256']});next()}catch{return bad(res,'Sesion no valida. Ingresa nuevamente.',401)}};
@@ -22,6 +23,12 @@ app.get('/api/dashboard',auth,safe(async(req,res)=>{
  const [[loans]]=await pool.query('SELECT COUNT(*) AS pending FROM loans WHERE returned_at IS NULL');
  const [recent]=await pool.query(`SELECT mv.id,mv.movement_type,mv.quantity_units,mv.created_at,p.name product,u.full_name collaborator FROM movements mv JOIN products p ON p.id=mv.product_id JOIN users u ON u.id=mv.user_id ORDER BY mv.id DESC LIMIT 15`);
  res.json({summary,modules:mods,loans:loans.pending,recent});
+}));
+app.get('/api/products/search',auth,safe(async(req,res)=>{
+ const query=req.query.q;
+ if(typeof query!=='string')return bad(res,'Indica un código, SAP o nombre para buscar.');
+ try{res.json(await searchProducts(pool,query))}
+ catch(e){if(e instanceof RangeError)return bad(res,e.message);throw e}
 }));
 app.get('/api/products',auth,safe(async(req,res)=>{
  const [rows]=await pool.query(`SELECT p.id,p.name,p.sap_code,p.barcode,p.kind,p.active,p.units_per_pack,p.notes,p.module_id,m.name module,m.inventory_status,i.stock_units,i.original_pack_count,i.min_stock_units FROM products p JOIN modules m ON m.id=p.module_id JOIN inventory i ON i.product_id=p.id ORDER BY p.module_id,p.source_row`);res.json(rows);
