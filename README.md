@@ -25,7 +25,7 @@
 ## Para probar un retiro
 1. Administracion > seleccionar un repuesto, clasificar como `consumible`, marcar activo, guardar.
 2. Confirmar su stock, dejando sin activar las referencias con conteo desconocido.
-3. Escanear / mover > leer codigo CVP del repuesto o seleccionarlo > elegir retiro o entrada > indicar unidades > confirmar.
+3. Escanear / mover > leer codigo CVP del repuesto o seleccionarlo > elegir retiro o entrada > indicar unidades > confirmar. Para colaboradores y encargados el repuesto debe estar activo; el administrador tambien puede registrar entradas y consumos de repuestos inactivos con un motivo auditado. Ningun movimiento admite stock desconocido (NULL).
 4. Dashboard e Inventario reflejan el movimiento.
 
 ## Para probar un prestamo
@@ -35,7 +35,7 @@
 4. Prestamos > usar `Devolver` para marcarla disponible.
 
 ## Notas importantes
-- Solo el administrador puede ajustar stock y modificar productos. Los ajustes exigen motivo y dejan rastro.
+- Solo el administrador puede ajustar stock y modificar productos. Los ajustes exigen motivo y dejan rastro. Las entradas y consumos administrativos tambien registran motivo, autorizador, saldos anterior/posterior y auditoria, sin activar el producto.
 - Para acceso desde celular no se debe exponer el puerto 3000 directamente a Internet: desplegar en un servicio web con HTTPS y guardar las credenciales en variables de entorno privadas.
 - La lectura por camara usa la API `BarcodeDetector` si esta disponible y carga `@zxing/browser` localmente como alternativa. La camara necesita HTTPS o localhost y permiso del navegador; tambien se admite lector USB/Bluetooth o entrada manual.
 - La busqueda de productos en Escanear / mover consulta MySQL por CVP, SAP o nombre y muestra los articulos pendientes sin permitir moverlos. El lector ZXing se carga solo cuando hace falta y Render lo sirve desde la dependencia instalada, sin CDN.
