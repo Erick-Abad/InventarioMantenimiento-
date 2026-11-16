@@ -1,5 +1,5 @@
 require('dotenv').config();
-const express=require('express');const helmet=require('helmet');const rateLimit=require('express-rate-limit');const jwt=require('jsonwebtoken');const bcrypt=require('bcryptjs');const crypto=require('crypto');const ExcelJS=require('exceljs');const path=require('path');const {pool}=require('./storage');const {searchProducts}=require('./product-search');const {loanBlockReason}=require('./public/tool-availability');const {listToolAssets}=require('./tool-inventory');const {registerAdminMovement}=require('./admin-movement');
+const express=require('express');const helmet=require('helmet');const rateLimit=require('express-rate-limit');const jwt=require('jsonwebtoken');const bcrypt=require('bcryptjs');const crypto=require('crypto');const ExcelJS=require('exceljs');const path=require('path');const {pool}=require('./storage');const {searchProducts}=require('./product-search');const {loanBlockReason}=require('./public/tool-availability');const {listToolAssets}=require('./tool-inventory');const {registerAdminMovement}=require('./admin-movement');const {listActiveLoginUsers,identifyLoginUser,authenticateLogin}=require('./login-auth');
 const app=express();app.disable('x-powered-by');app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'32kb'}));app.use(express.static(path.join(__dirname,'public')));
 app.use('/vendor/zxing',express.static(path.join(__dirname,'node_modules','@zxing','browser','umd'),{index:false,maxAge:'1d'}));
 const safe=(f)=>(req,res,next)=>Promise.resolve(f(req,res,next)).catch(next);
@@ -10,12 +10,19 @@ const integer=(v)=>Number.isSafeInteger(Number(v))&&Number(v)>0?Number(v):null;
 const uid=()=>crypto.randomUUID();
 const audit=async(c,actor,action,entity,id,details)=>c.query('INSERT INTO audit_logs(actor_id,action_name,entity_name,entity_id,details_json) VALUES(?,?,?,?,?)',[actor,action,entity,id,JSON.stringify(details||{})]);
 app.get('/api/health',safe(async(req,res)=>{await pool.query('SELECT 1');res.json({ok:true,database:'connected'})}));
+app.get('/api/login/users',rateLimit({windowMs:15*60*1000,limit:60,standardHeaders:'draft-7',legacyHeaders:false}),safe(async(req,res)=>{
+ res.json(await listActiveLoginUsers(pool));
+}));
+app.get('/api/login/identify',rateLimit({windowMs:15*60*1000,limit:60,standardHeaders:'draft-7',legacyHeaders:false}),safe(async(req,res)=>{
+ try{res.json(await identifyLoginUser(pool,req.query.barcode))}
+ catch(e){if(e.status)return bad(res,e.message,e.status);throw e}
+}));
 app.post('/api/login',rateLimit({windowMs:15*60*1000,limit:12,standardHeaders:'draft-7',legacyHeaders:false}),safe(async(req,res)=>{
- const {barcode,password}=req.body;if(typeof barcode!=='string'||typeof password!=='string'||barcode.length>70)return bad(res,'Credenciales invalidas');
- const [rows]=await pool.query('SELECT id,full_name,employee_barcode,password_hash,role FROM users WHERE employee_barcode=? AND active=1 LIMIT 1',[barcode.trim()]);
- if(!rows.length||!(await bcrypt.compare(password,rows[0].password_hash)))return bad(res,'Codigo o contrasena incorrectos',401);
- const u=rows[0];const token=jwt.sign({id:u.id,name:u.full_name,role:u.role},process.env.JWT_SECRET,{expiresIn:'8h',algorithm:'HS256'});
- res.json({token,user:{id:u.id,name:u.full_name,role:u.role}});
+ try{
+  const u=await authenticateLogin(pool,req.body);
+  const token=jwt.sign({id:u.id,name:u.name,role:u.role},process.env.JWT_SECRET,{expiresIn:'8h',algorithm:'HS256'});
+  res.json({token,user:u});
+ }catch(e){if(e.status)return bad(res,e.message,e.status);throw e}
 }));
 app.get('/api/dashboard',auth,safe(async(req,res)=>{
  const [[summary]]=await pool.query(`SELECT COUNT(*) AS products,SUM(p.barcode IS NOT NULL) AS barcodes,SUM(i.stock_units IS NULL) AS uncounted,COALESCE(SUM(i.stock_units),0) AS units FROM products p JOIN inventory i ON i.product_id=p.id`);

@@ -1,0 +1,12 @@
+.login-panel{max-width:520px}
+.login-panel h1{margin-top:24px}
+.login-methods{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin:22px 0 18px}
+.login-method{width:100%;padding:10px 7px;font-size:13px;line-height:1.3}
+.login-method.selected{border-color:var(--teal);background:#e9f8f8;color:var(--teal)}
+.login-method-panel{margin-bottom:4px}
+.login-feedback{min-height:20px;margin:9px 0 14px;font-size:13px;color:var(--muted)}
+.login-feedback.success{color:#176943;font-weight:600}
+.login-feedback.error{color:#a33636;font-weight:600}
+.login-panel .secondary{margin-bottom:3px}
+.login-panel form>.primary{margin-top:2px}
+@media(max-width:520px){.login-methods{grid-template-columns:1fr}.login-method{padding:11px;text-align:left}}
