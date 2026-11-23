@@ -1,9 +1,25 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { filterToolAssets, loanBlockReason } = require('../public/tool-availability');
+const { filterToolAssets, loanBlockReason, workshopToolReferences } = require('../public/tool-availability');
 
 test('only active tools in available state can be loaned', () => {
   assert.equal(loanBlockReason({ kind: 'herramienta', active: 1, asset_status: 'disponible' }), null);
+});
+
+test('the workshop loan catalog can show and filter imported references without treating them as individual assets', () => {
+  const products = [
+    { id: 1, barcode: 'CTH000001', kind: 'pendiente', active: 0, location: 'Casillero con llave' },
+    { id: 2, barcode: 'CTH000002', kind: 'herramienta', active: 1, location: 'Casillero con llave' },
+    { id: 3, barcode: 'CTH000003', kind: 'consumible', active: 1, location: 'Casillero con llave' },
+    { id: 4, barcode: 'CTH000004', kind: 'herramienta', active: 1, location: 'Herramientas generales' }
+  ];
+  const assets = [{ product_id: 2, asset_barcode: 'TALLER-002', kind: 'herramienta', active: 1, asset_status: 'disponible' }];
+  const references = workshopToolReferences(products, assets);
+  assert.deepEqual(references.map(row => row.id), [1, 4]);
+  assert.deepEqual(filterToolAssets(references, { query: 'cth000001', location: 'Casillero con llave', status: 'validacion' }), [references[0]]);
+  assert.deepEqual(filterToolAssets(references, { location: 'Herramientas generales' }), [references[1]]);
+  assert.deepEqual(filterToolAssets([...assets, ...references], { status: 'disponible' }), assets);
+  assert.ok(references.every(reference => !reference.asset_barcode && loanBlockReason(reference)));
 });
 
 test('inactive assets remain blocked for physical validation even if their stored state is available', () => {

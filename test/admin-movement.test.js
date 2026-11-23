@@ -4,14 +4,15 @@ const { registerAdminMovement } = require('../admin-movement');
 
 const requestId = 'c0a80123-4567-489a-8abc-0123456789ab';
 
-function createPool({ kind = 'consumible', stock = 150, duplicateRequest = false } = {}) {
+function createPool({ kind = 'consumible', stock = 150, duplicateRequest = false, active = 1, moduleId = 1, counted = true } = {}) {
   const state = { stock, events: [], inserts: [], committed: false, released: false };
   let stockAtTransactionStart = stock;
   const connection = {
     async beginTransaction() { stockAtTransactionStart = state.stock; state.events.push('begin'); },
     async query(sql, params) {
       state.events.push(sql.trim().split(/\s+/)[0].toLowerCase());
-      if (sql.includes('SELECT p.kind,i.stock_units')) return [[{ kind, stock_units: state.stock }]];
+      if (sql.includes('SELECT p.kind,i.stock_units')) return [[{ kind, stock_units: state.stock, active, module_id: moduleId, last_counted_at: counted ? new Date() : null }]];
+      if (sql.includes('SELECT role,active FROM users')) return [[{ active: 1, role: 'administrador' }]];
       if (sql.startsWith('UPDATE inventory')) state.stock = params[0];
       if (sql.startsWith('INSERT INTO movements')) {
         if (duplicateRequest) throw Object.assign(new Error('Duplicate request'), { code: 'ER_DUP_ENTRY' });
@@ -38,7 +39,7 @@ const movement = overrides => ({
 });
 
 test('admin can record a justified entry for an inactive product without activating it', async () => {
-  const { pool, state } = createPool({ stock: 150 });
+  const { pool, state } = createPool({ stock: 150, active: 0 });
   const result = await registerAdminMovement(pool, movement({}));
 
   assert.deepEqual(result, { before: 150, after: 235 });
@@ -78,7 +79,7 @@ function createPersistentConnection(inserts, getStock, setStock) {
   const connection = {
     async beginTransaction() {},
     async query(sql, params) {
-      if (sql.includes('SELECT p.kind,i.stock_units')) return [[{ kind: 'consumible', stock_units: getStock() }]];
+      if (sql.includes('SELECT p.kind,i.stock_units')) return [[{ kind: 'consumible', stock_units: getStock(), active: 1 }]];
       if (sql.startsWith('UPDATE inventory')) setStock(params[0]);
       if (sql.startsWith('INSERT INTO movements')) inserts.push({ table: 'movements', params });
       if (sql.startsWith('INSERT INTO audit_logs')) inserts.push({ table: 'audit_logs', params });
@@ -101,6 +102,31 @@ test('unknown stock remains NULL and no movement writes occur', async () => {
   assert.deepEqual(state.inserts, []);
   assert.equal(state.events.includes('rollback'), true);
   assert.equal(state.committed, false);
+});
+
+test('an administrator cannot withdraw inactive stock', async () => {
+  const { pool, state } = createPool({ active: 0 });
+  await assert.rejects(() => registerAdminMovement(pool, movement({ type: 'consumo' })), /producto está inactivo/);
+  assert.equal(state.stock, 150);
+  assert.deepEqual(state.inserts, []);
+});
+
+test('Taller verifies the worker and physical count even when area is missing from a request', async () => {
+  const user = { id: 4, role: 'administrador', credentialVerified: true };
+  const { pool, state } = createPool({ moduleId: 11, counted: false });
+  await assert.rejects(() => registerAdminMovement(pool, movement({})), /credencial/);
+  await assert.rejects(() => registerAdminMovement(pool, movement({ area: 'valvulas', user })), /otra área/);
+  await assert.rejects(() => registerAdminMovement(pool, movement({ user })), /pendiente de verificación/);
+  assert.equal(state.stock, 150);
+  assert.deepEqual(state.inserts, []);
+});
+
+test('a verified Taller worker can record a stock movement with observations', async () => {
+  const { pool, state } = createPool({ moduleId: 11 });
+  const user = { id: 4, role: 'administrador', credentialVerified: true };
+  const result = await registerAdminMovement(pool, movement({ user, area: 'taller', adminMovement: false, type: 'consumo' }));
+  assert.deepEqual(result, { before: 150, after: 65 });
+  assert.deepEqual(state.inserts[0].params.slice(0, 8), [12, 4, null, 'consumo', 85, 150, 65, 'Conteo y reposición confirmados']);
 });
 
 test('consumption cannot create a negative stock balance', async () => {
@@ -135,4 +161,38 @@ test('a duplicate request rolls back the stock update', async () => {
   assert.equal(state.committed, false);
   assert.equal(state.events.includes('rollback'), true);
   assert.deepEqual(state.inserts, []);
+});
+
+test('two withdrawals sharing one locked balance cannot both spend the same units', async () => {
+  let stock = 5;
+  let lock = Promise.resolve();
+  const pool = {
+    async getConnection() {
+      let unlock;
+      return {
+        async beginTransaction() {},
+        async query(sql, params) {
+          if (sql.includes('SELECT p.kind,i.stock_units')) {
+            assert.match(sql, /FOR UPDATE/);
+            const previous = lock;
+            lock = new Promise(resolve => { unlock = resolve; });
+            await previous;
+            return [[{ kind:'consumible', stock_units:stock, active:1 }]];
+          }
+          assert.ok(unlock, 'Las escrituras deben ocurrir con el bloqueo activo.');
+          if (sql.startsWith('UPDATE inventory')) stock = params[0];
+          return [{ affectedRows:1 }];
+        },
+        async commit() { unlock(); },
+        async rollback() { unlock(); },
+        release() {}
+      };
+    }
+  };
+  const first = movement({ quantity:4, type:'consumo', adminMovement:false });
+  const second = { ...first, userId:5, requestId:'c0a80123-4567-489a-8abc-0123456789ac' };
+  const results = await Promise.allSettled([registerAdminMovement(pool,first),registerAdminMovement(pool,second)]);
+  assert.equal(results.filter(result=>result.status==='fulfilled').length,1);
+  assert.match(results.find(result=>result.status==='rejected').reason.message,/excede el stock disponible/);
+  assert.equal(stock,1);
 });

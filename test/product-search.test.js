@@ -46,3 +46,13 @@ test('empty search does not query the database and oversized input is rejected',
   await assert.rejects(() => searchProducts(pool, 'x'.repeat(101)), RangeError);
   assert.equal(queried, false);
 });
+
+test('a scanned Taller code uses exact barcode lookup within the selected area', async () => {
+  const pool = { async query(sql, args) {
+    assert.match(sql, /WHERE p\.module_id=11 AND \(p\.barcode=\?\)/);
+    assert.deepEqual(args, ['CTH000379']);
+    return [[]];
+  } };
+  assert.deepEqual(await searchProducts(pool, ' cth000379 ', 'taller'), []);
+  await assert.rejects(() => searchProducts(pool, 'CTH000379', 'invalid'), /Área de inventario inválida/);
+});
