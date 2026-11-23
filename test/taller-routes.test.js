@@ -2,7 +2,6 @@ const { randomUUID } = require('node:crypto');
 const { once } = require('node:events');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 
 test('Taller HTTP workflow requires a physical count and records only verified tools and authorized operations', async () => {
@@ -12,6 +11,9 @@ test('Taller HTTP workflow requires a physical count and records only verified t
   const audit = [];
   const password = 'test-password-42';
   const account = { id:4, full_name:'Prueba', role:'administrador', active:1, password_hash:await bcrypt.hash(password,4) };
+  const worker = {...account,id:5,full_name:'Colaborador',role:'colaborador'};
+  const users = new Map([[4,account],[5,worker]]), sessions = new Map();
+  let mode='ADMIN_PRESENTE';
   let lockedReads = 0;
   const connection = {
     async beginTransaction() {},
@@ -20,8 +22,18 @@ test('Taller HTTP workflow requires a physical count and records only verified t
     release() {},
     async query(sql, args) {
       if (sql.includes('FOR UPDATE')) lockedReads++;
+      if (sql.startsWith('INSERT INTO app_sessions')) {sessions.set(args[0],{id:args[1],ended_at:null});return [{affectedRows:1}];}
+      if (sql.includes('FROM app_sessions s JOIN users')) {
+        const session=sessions.get(args[1]),user=users.get(args[2]);
+        return [session?.id===user?.id?[{...user,...session,name:user.full_name,expired:0}]:[]];
+      }
+      if (sql.startsWith('UPDATE app_sessions SET last_seen')) return [{affectedRows:1}];
+      if (sql.startsWith('UPDATE app_sessions SET ended_at')) {sessions.get(args[0]).ended_at=new Date();return [{affectedRows:1}];}
+      if (sql.includes('FROM workshop_control'))return [[{mode}]];
+      if (sql.startsWith('UPDATE workshop_control')) {mode=args[0];return [{affectedRows:1}];}
       if (sql.includes('WHERE id=? AND employee_barcode=?')) return [args[0]===4&&args[1]==='EMP-4' ? [account] : []];
-      if (sql.includes('SELECT id,full_name,password_hash,role,active')) return [[account]];
+      if (sql.includes('SELECT id,full_name,password_hash,role,active')) return [[users.get(Number(args[0]))]];
+      if (sql.includes('credential_matches FROM users')) return [[{...users.get(args[1]),credential_matches:args[0]===`EMP-${args[1]}`}]];
       if (sql.includes('SELECT role,active FROM users')) return [[account]];
       if (sql.startsWith('SELECT p.module_id')) return [[product]];
       if (sql.startsWith('SELECT COUNT(*) total FROM tool_assets')) return [[{ total:assets.length }]];
@@ -34,18 +46,21 @@ test('Taller HTTP workflow requires a physical count and records only verified t
       } else if (sql.startsWith('INSERT INTO tool_assets')) {
         assets.push({ id:1, asset_status:args[3] });
         return [{ insertId:1 }];
-      } else if (sql.includes('SELECT ta.asset_status')) {
+      } else if (sql.includes('SELECT ta.id,ta.asset_status')) {
         return [[{ ...product, ...assets[0] }]];
+      } else if (sql.startsWith('SELECT id FROM loans WHERE open_asset_id')) {
+        return [loans.filter(loan=>!loan.returned_at)];
       } else if (sql.startsWith('SELECT id FROM loans WHERE asset_id')) {
         return [loans.filter(loan=>loan.notes===args[1])];
       } else if (sql.startsWith('INSERT INTO loans')) {
-        loans.push({ id:1, asset_id:1, borrower_id:args[1], returned_at:null, notes:args[3], module_id:11 });
-        return [{ insertId:1 }];
-      } else if (sql.includes('SELECT l.asset_id,l.returned_at')) {
-        return [loans];
+        loans.push({ id:loans.length+1, asset_id:1, borrower_id:args[1], loaned_by:args[2], returned_at:null, notes:args[4], module_id:11 });
+        return [{ insertId:loans.length }];
+      } else if (sql.includes('SELECT l.id,l.asset_id,l.returned_at')) {
+        return [loans.filter(loan=>sql.includes('WHERE l.id=?')?loan.id===args[0]:!loan.returned_at)
+          .map(loan=>({...loan,asset_status:assets[0].asset_status}))];
       } else if (sql.startsWith('UPDATE loans SET returned_at')) {
-        loans[0].returned_at=new Date();
-        loans[0].condition=args[1];
+        loans.find(loan=>loan.id===args[2]).returned_at=new Date();
+        loans.find(loan=>loan.id===args[2]).condition=args[1];
       } else if (sql.startsWith('UPDATE tool_assets SET asset_status')) {
         assets[0].asset_status=sql.includes("'prestada'")?'prestada':args[0];
       } else if (sql.startsWith('INSERT INTO audit_logs')) {
@@ -62,7 +77,7 @@ test('Taller HTTP workflow requires a physical count and records only verified t
   const server=require('../server').listen(0,'127.0.0.1');
   await once(server,'listening');
   const root='http://127.0.0.1:'+server.address().port+'/api';
-  let token=jwt.sign({ id:4, role:account.role },process.env.JWT_SECRET,{ expiresIn:'5m', algorithm:'HS256' });
+  let token='';
   async function call(path,data,expected,method='POST') {
     const response=await fetch(root+path,{ method, headers:{ Authorization:'Bearer '+token, 'Content-Type':'application/json' }, body:JSON.stringify(data) });
     const result=await response.json();
@@ -103,6 +118,30 @@ test('Taller HTTP workflow requires a physical count and records only verified t
     assert.equal(product.stock_units,1);
     assert.equal(audit.at(-1).action,'devolucion');
     assert.ok(lockedReads>=12);
+    const adminToken=token;
+    const workerToken=(await call('/login',{user_id:5,password},200)).token;
+    token=workerToken;
+    const selfLoan={...loan,employee_barcode:'EMP-5',request_id:randomUUID()};
+    await call('/loans',selfLoan,403);
+    await call('/admin/workshop/mode',{mode:'AUTOSERVICIO'},403,'PATCH');
+    await call('/movements',{},403);
+    token=adminToken;
+    await call('/admin/workshop/mode',{mode:'AUTOSERVICIO'},200,'PATCH');
+    token=workerToken;
+    await call('/loans',selfLoan,409);
+    assets[0].asset_status='disponible';
+    await call('/loans',{...selfLoan,employee_barcode:'EMP-4'},403);
+    const borrowed=await call('/loans',selfLoan,200);
+    assert.equal(loans[1].loaned_by,5);
+    await call('/loans/return-by-code',{area:'taller',asset_barcode:'TALLER-IND-001',employee_barcode:'EMP-5'},200);
+    assert.ok(loans.find(row=>row.id===borrowed.id).returned_at);
+    token=adminToken;
+    await call('/admin/workshop/mode',{mode:'ADMIN_PRESENTE'},200,'PATCH');
+    token=workerToken;
+    await call('/loans',{...selfLoan,request_id:randomUUID()},403);
+    worker.active=0;
+    await call('/loans',{...selfLoan,request_id:randomUUID()},401);
+    assert.equal(audit.at(-1).action,'cierre_sesion');
   } finally {
     server.close();
     await once(server,'close');

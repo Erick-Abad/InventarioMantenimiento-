@@ -45,16 +45,32 @@ function historyQuery(area) {
           WHERE ${scope} AND a.entity_name='inventory' AND a.action_name='verificar_conteo'`;
 }
 
-async function listHistory(pool, area, { userId, limit = 15, offset = 0 } = {}) {
+async function listHistory(pool, area, { userId, moduleId, assetBarcode, location, from, to, limit = 15, offset = 0 } = {}) {
+  const workshop=area==='taller';
+  const locationSql=`COALESCE(al.name,${productLocation(workshop)})`;
+  const filters=[['h.user_id=?',userId],['p.module_id=?',moduleId],['h.asset_barcode=?',assetBarcode],
+    [`${locationSql}=?`,location],['h.created_at>=?',from],['h.created_at<DATE_ADD(?,INTERVAL 1 DAY)',to]].filter(([,value])=>value);
   const [rows] = await pool.query(
     `WITH history AS (${historyQuery(area)})
-     SELECT h.*,p.name product,p.barcode,m.name module,u.full_name collaborator
+     SELECT h.*,p.name product,p.barcode,m.name module,${locationSql} location,u.full_name collaborator
      FROM history h JOIN products p ON p.id=h.product_id JOIN modules m ON m.id=p.module_id
-     LEFT JOIN users u ON u.id=h.user_id ${userId ? 'WHERE h.user_id=?' : ''}
+     ${productDetailJoins(workshop)} LEFT JOIN users u ON u.id=h.user_id
+     LEFT JOIN tool_assets ht ON ht.asset_barcode=h.asset_barcode COLLATE utf8mb4_0900_ai_ci
+     LEFT JOIN tool_locations tl ON tl.asset_id=ht.id LEFT JOIN inventory_locations al ON al.id=tl.location_id
+     ${filters.length?'WHERE '+filters.map(([sql])=>sql).join(' AND '):''}
      ORDER BY h.created_at DESC,h.id DESC,h.movement_type DESC LIMIT ? OFFSET ?`,
-    userId ? [userId,limit,offset] : [limit,offset]
+    [...filters.map(([,value])=>value),limit,offset]
   );
   return rows;
+}
+
+function productDetailJoins(workshop) {
+  return `LEFT JOIN product_details pd ON pd.product_id=p.id LEFT JOIN inventory_locations pl ON pl.id=pd.location_id
+    ${workshop?'LEFT JOIN taller_carga_20261123 s ON BINARY s.barcode=BINARY p.barcode':''}`;
+}
+
+function productLocation(workshop) {
+  return `COALESCE(pl.name,${workshop?"NULLIF(TRIM(s.location_validated),''),NULLIF(TRIM(s.section_name),''),":''}m.name)`;
 }
 
 async function listAreaProducts(pool, area) {
@@ -70,8 +86,13 @@ async function listAreaProducts(pool, area) {
                WHERE entity_name='products' AND action_name='editar_producto' GROUP BY entity_id)
      SELECT p.id,p.name,p.sap_code,p.barcode,p.kind,p.active,p.units_per_pack,p.notes,p.module_id,
             m.name module,m.inventory_status,i.stock_units,i.original_pack_count,i.min_stock_units,i.last_counted_at,
-            ${workshop ? "COALESCE(NULLIF(TRIM(s.location_validated),''),NULLIF(TRIM(s.section_name),''),m.name)" : 'm.name'} location,
-            ${workshop ? "NULLIF(TRIM(s.location_validated),'') IS NOT NULL" : '1'} location_validated,
+            ${productLocation(workshop)} location,
+            ${workshop ? "(pl.id IS NOT NULL OR NULLIF(TRIM(s.location_validated),'') IS NOT NULL)" : '1'} location_validated,
+            pd.location_id,pd.measure,pd.specifications,
+            ${workshop?"COALESCE(pd.brand,NULLIF(TRIM(s.brand),''))":"pd.brand"} brand,
+            ${workshop?"COALESCE(pd.model,NULLIF(TRIM(s.model),''))":"pd.model"} model,
+            ${workshop?"COALESCE(pd.capacity,NULLIF(TRIM(s.capacity),''))":"pd.capacity"} capacity,
+            ${workshop?"COALESCE(pd.category,NULLIF(TRIM(s.record_type),''))":"pd.category"} category,
             CASE WHEN p.active=0 THEN 'Pendiente de validación'
                  WHEN p.kind='pendiente' OR ${workshop ? 'i.last_counted_at IS NULL OR i.stock_units IS NULL' : "(p.kind='consumible' AND i.stock_units IS NULL)"} THEN 'Pendiente de conteo o clasificación'
                  WHEN p.kind='herramienta' AND COALESCE(a.available,0)>0 ${workshop ? 'AND i.stock_units>0' : ''} THEN 'Disponible para préstamo'
@@ -82,7 +103,7 @@ async function listAreaProducts(pool, area) {
             u.full_name last_worker,
             GREATEST(COALESCE(i.updated_at,p.created_at),COALESCE(l.created_at,p.created_at),COALESCE(e.edited_at,p.created_at)) updated_at
      FROM products p JOIN modules m ON m.id=p.module_id LEFT JOIN inventory i ON i.product_id=p.id
-     ${workshop ? 'LEFT JOIN taller_carga_20261123 s ON BINARY s.barcode=BINARY p.barcode' : ''}
+     ${productDetailJoins(workshop)}
      LEFT JOIN latest l ON l.product_id=p.id AND l.rn=1 LEFT JOIN users u ON u.id=l.user_id
      LEFT JOIN assets a ON a.product_id=p.id LEFT JOIN edits e ON e.entity_id=p.id
      WHERE ${scope} ORDER BY p.module_id,p.source_row,p.id`
@@ -90,4 +111,4 @@ async function listAreaProducts(pool, area) {
   return rows;
 }
 
-module.exports = { TALLER_ID, invalid, areaCondition, requireArea, requireTallerWorker, listHistory, listAreaProducts };
+module.exports = { TALLER_ID, invalid, areaCondition, requireArea, requireTallerWorker, listHistory, listAreaProducts, productDetailJoins, productLocation };

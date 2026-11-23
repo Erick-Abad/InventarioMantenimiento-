@@ -59,7 +59,20 @@ Las consultas de inventario, búsqueda, dashboard, herramientas, préstamos y Ex
 
 ## Comprobación y Render
 
-Ejecutar `npm test` para las pruebas locales. El flujo de escritura usa datos simulados. El comando de arranque definido en `render.yaml` es `node server.js`, con comprobación en `/api/health`. La cámara en un dispositivo móvil requiere acceso por HTTPS y permiso del navegador.
+### Control del Taller
+
+- **Administrador presente** es el modo inicial. El administrador escoge al prestatario, puede indicar vencimiento y registra la entrega o devolución. Cada trabajador consulta sus propios préstamos.
+- **Autoservicio** se habilita de forma explícita en el encabezado por un administrador. El trabajador inicia sesión con contraseña, escoge **Retirar herramienta** o **Devolver herramienta**, escanea su credencial y luego la unidad física. Puede usar la cámara o un lector USB que envíe Enter al final. Para devolver una unidad dañada, marca **Reportar daño** antes de escanear. La credencial se limpia tras cada operación. El regreso a modo administrador presente bloquea inmediatamente las solicitudes nuevas de autoservicio.
+- El catálogo y el stock son independientes de las unidades físicas. En **Administración** se pueden gestionar módulos, ubicaciones, permisos, características y lotes explícitos de códigos individuales. El cambio masivo de estado exige una vista previa y confirmación. El historial y la etiqueta Code 128 de una unidad están en su ficha de **Préstamos**.
+- **Catálogo en Excel** genera una plantilla con referencias que tienen código. Al importar, se previsualizan las altas y actualizaciones. Las referencias nuevas quedan inactivas y con cantidad desconocida. La importación nunca ajusta stock ni mueve un producto entre módulos. Los ajustes auditados se hacen desde **Ajuste autorizado de existencias**.
+
+### Migración y publicación
+
+1. Confirma el respaldo lógico por TLS y conserva el archivo fuera de Git. Comprueba que la base de prueba corresponda a la misma estructura que Aiven antes de usarla para pruebas de escritura.
+2. Con las variables de la base de destino configuradas, ejecuta `npm run migrate:workshop` una vez desde un entorno de confianza antes de publicar el código. [La migración](migrations/001_workshop.sql) agrega tablas complementarias y preserva el modo registrado en `workshop_control` si la fila ya existe. Puede volver a ejecutarse.
+3. Ejecuta `npm test`. Comprueba en una base de prueba que el modo cerrado y los permisos se aplican dentro de la transacción, y que un préstamo simultáneo se rechaza. Conserva las credenciales de producción en las variables privadas de Render.
+4. Conserva `node server.js` y `/api/health` en Render. `SESSION_IDLE_MINUTES` es opcional y admite enteros del 1 al 120, con valor predeterminado de 15. Después del primer despliegue de esta versión se debe iniciar sesión de nuevo para crear una sesión revocable. La cámara móvil requiere HTTPS y permiso del navegador.
+5. Comprueba el acceso y la lectura de la API con una cuenta autorizada. Haz verificaciones de escritura en la base de prueba.
 
 ## Seguridad
 - Conexion DB bajo TLS con CA (rechazo de certificados no validos).

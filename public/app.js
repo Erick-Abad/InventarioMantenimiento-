@@ -1,6 +1,6 @@
 const $=id=>document.getElementById(id);let token=sessionStorage.getItem('invtoken')||'',me=JSON.parse(sessionStorage.getItem('invme')||'null'),products=[],assets=[],loans=[],selectedAssetId=null,stream=null,cameraControls=null,scanTimer=null,searchTimer=null,searchSequence=0,zxingLoadPromise=null,loginMethod='select',loginCodeTimer=null,loginIdentifySequence=0,identifiedScanCode='';
 let area='valvulas',activeTab='dashboard',inventoryPage=1,toolPage=1,toolReferences=[],historyPage=1,historySequence=0,returnLoan=null;
-let pickedTool=null;
+let pickedTool=null,workshopMode=null,idleSeconds=900,idleTimer,lastActivity=0,lastRefresh=0;
 let areaRevision=0,cameraRevision=0,movementPending=false,loanPending=false;
 const areaNames={valvulas:'Cuarto de Válvulas',taller:'Taller - Bodega de Herramientas'};
 const areaEndpoint=(endpoint,params={})=>endpoint+'?'+new URLSearchParams({area,...params});
@@ -10,13 +10,70 @@ const operationLabels={entrada:'Entrada',consumo:'Retiro',ajuste_positivo:'Ajust
 const scopedPost=(endpoint,data,method)=>post(endpoint,{...data,area},method);
 const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 function notice(s){const t=$('toast');t.textContent=s;t.hidden=false;setTimeout(()=>t.hidden=true,4800)}
-async function api(endpoint,options={}){const headers={...(options.headers||{}),Authorization:'Bearer '+token};if(options.body)headers['Content-Type']='application/json';const r=await fetch('/api'+endpoint,{...options,headers});if(r.status===401){logout();throw Error('Tu sesión venció')}if(!r.ok){const data=await r.json().catch(()=>({}));throw Error(data.error||'No se pudo completar la solicitud')}return endpoint.split('?')[0]==='/export'?r.blob():r.json()}
+async function api(endpoint,options={}){const headers={...(options.headers||{}),Authorization:'Bearer '+token};if(options.body)headers['Content-Type']='application/json';const r=await fetch('/api'+endpoint,{...options,headers});if(r.status===401){logout(false);throw Error('Tu sesión venció')}if(!r.ok){const data=await r.json().catch(()=>({}));throw Error(data.error||'No se pudo completar la solicitud')}return /spreadsheetml|image\/svg/.test(r.headers.get('content-type')||'')?r.blob():r.json()}
 const post=(url,data,method='POST')=>api(url,{method,body:JSON.stringify(data)});
 async function loadLoginUsers(){const response=await fetch('/api/login/users');const users=await response.json().catch(()=>[]);if(!response.ok)throw Error(users.error||'No se pudo cargar la lista de usuarios');$('login-user').innerHTML='<option value="">Selecciona tu nombre</option>'+users.map(user=>`<option value="${user.id}">${escapeHtml(user.full_name)}</option>`).join('')}
 function setLoginMethod(method){loginMethod=method;const methods=['select','manual','scan'];for(const current of methods){$(`login-${current}-panel`).hidden=current!==method;const button=document.querySelector(`[data-login-method="${current}"]`);button.classList.toggle('selected',current===method);button.setAttribute('aria-selected',String(current===method))}$('login-user').required=method==='select';$('login-manual-code').required=method==='manual';$('login-scan-code').required=method==='scan';if(method!=='scan'){identifiedScanCode='';$('login-identify-message').textContent='El escaneo identifica tu usuario, pero no inicia sesión.';$('login-identify-message').className='login-feedback'}}
 async function identifyLoginCode(value){const code=value.trim(),sequence=++loginIdentifySequence,feedback=$('login-identify-message');identifiedScanCode='';if(!code){feedback.textContent='Escanea o escribe el código de tu credencial.';feedback.className='login-feedback';return false}feedback.textContent='Buscando usuario…';feedback.className='login-feedback';try{const response=await fetch('/api/login/identify?barcode='+encodeURIComponent(code));const result=await response.json().catch(()=>({}));if(sequence!==loginIdentifySequence)return false;if(!response.ok)throw Error(result.error||'No se pudo identificar la credencial.');identifiedScanCode=code;feedback.textContent=`Credencial identificada: ${result.name}. Ingresa tu contraseña para continuar.`;feedback.className='login-feedback success';return true}catch(error){if(sequence!==loginIdentifySequence)return false;feedback.textContent=error.message;feedback.className='login-feedback error';return false}}
-function logout(){stopCamera();areaRevision++;searchSequence++;historySequence++;sessionStorage.clear();token='';me=null;$('app').hidden=true;$('login').hidden=false;$('login-password').value='';loadLoginUsers().catch(e=>notice(e.message))}
-function showApp(){if(!token||!me)return;const isAdmin=me.role==='administrador';$('login').hidden=true;$('app').hidden=false;$('identity').textContent=me.name+' · '+me.role;document.querySelectorAll('.admin-only').forEach(x=>x.hidden=!isAdmin);$('movement-reason').required=isAdmin;$('movement-reason').minLength=isAdmin?5:0;$('movement-reason-label').textContent=isAdmin?'Motivo administrativo':'Observaciones';selectArea('valvulas','dashboard')}
+function logout(reason='salida'){
+  const previous=token;
+  stopCamera();clearTimeout(idleTimer);areaRevision++;searchSequence++;historySequence++;sessionStorage.clear();
+  token='';me=null;workshopMode=null;$('app').hidden=true;$('login').hidden=false;$('login-password').value='';$('self-credential').value='';
+  for(const id of ['login-manual-code','login-scan-code','worker-code','loan-notes'])$(id).value='';
+  for(const id of ['asset-details','tools-list','loans-list','recent','product-list'])$(id).replaceChildren();
+  assets=[];loans=[];products=[];toolReferences=[];pickedTool=null;selectedAssetId=null;
+  if(typeof clearCatalogSession==='function')clearCatalogSession();
+  loadLoginUsers().catch(e=>notice(e.message));
+  if(reason&&previous)fetch('/api/logout',{method:'POST',headers:{Authorization:'Bearer '+previous,'Content-Type':'application/json'},body:JSON.stringify({reason}),keepalive:true}).catch(()=>{});
+}
+function activity(refresh=false){
+  if(!token)return;
+  const now=Date.now();
+  if(now-lastActivity>idleSeconds*1000){logout('inactividad');return}
+  lastActivity=now;
+  clearTimeout(idleTimer);
+  idleTimer=setTimeout(()=>logout('inactividad'),idleSeconds*1000);
+  if(refresh&&now-lastRefresh>Math.min(60000,idleSeconds*500)){
+    lastRefresh=now;
+    api('/session').catch(error=>{if(token)notice(error.message)});
+  }
+}
+function showApp(){
+  if(!token||!me)return;
+  const isAdmin=me.role==='administrador';
+  $('login').hidden=true;$('app').hidden=false;
+  $('identity').textContent=me.name+' · '+me.role;
+  document.querySelectorAll('.admin-only').forEach(item=>item.hidden=!isAdmin);
+  $('movement-reason').required=true;
+  $('history-worker').hidden=!isAdmin;
+  lastActivity=lastRefresh=Date.now();
+  activity();
+  selectArea('valvulas',isAdmin?'dashboard':'prestamos');
+  refreshMode().catch(e=>notice(e.message));
+}
+for(const event of ['pointerdown','keydown','touchstart'])document.addEventListener(event,()=>activity(true),{passive:true});
+const isAdmin=()=>me?.role==='administrador';
+const canOperateTools=()=>isAdmin()||workshopMode==='AUTOSERVICIO';
+function showMode(mode){
+  workshopMode=mode.mode;
+  $('workshop-mode-label').textContent=workshopMode==='AUTOSERVICIO'?'Autoservicio habilitado':'Administrador presente · autoservicio cerrado';
+  $('workshop-mode-toggle').textContent=workshopMode==='AUTOSERVICIO'?'Cerrar autoservicio':'Habilitar autoservicio';
+  $('workshop-mode-toggle').disabled=false;
+  $('self-service-form').hidden=isAdmin()||workshopMode!=='AUTOSERVICIO';
+  if(activeTab==='prestamos')renderTools();
+}
+async function refreshMode(){
+  const previous=token;
+  const mode=await api('/workshop/mode');
+  if(token===previous)showMode(mode);
+}
+$('workshop-mode-toggle').onclick=async()=>{
+  const next=workshopMode==='AUTOSERVICIO'?'ADMIN_PRESENTE':'AUTOSERVICIO';
+  if(next==='AUTOSERVICIO'&&!confirm('¿Habilitar el autoservicio durante tu ausencia?'))return;
+  $('workshop-mode-toggle').disabled=true;
+  try{showMode(await post('/admin/workshop/mode',{mode:next},'PATCH'))}
+  catch(e){notice(e.message);$('workshop-mode-toggle').disabled=false}
+};
 async function load(){
   const revision=areaRevision;
   const rows=await api(areaEndpoint('/products'));
@@ -30,6 +87,8 @@ async function load(){
   const location=$('module-filter'),selected=location.value;
   location.innerHTML='<option value="">Todas las ubicaciones</option>'+options.map(value=>`<option>${escapeHtml(value)}</option>`).join('');
   if(options.includes(selected))location.value=selected;
+  const categories=[...new Set(products.map(product=>product.category).filter(Boolean))].sort();
+  setFilterOptions('inventory-category',categories,'Todas las categorías');
   filterProducts();
   updateEdit();
   updateAdjust();
@@ -44,8 +103,8 @@ function setSelect(id,rows,placeholder=''){
 function selectArea(next,tab=activeTab==='prestamos'?'prestamos':'inventario'){
   areaRevision++;searchSequence++;historySequence++;clearTimeout(searchTimer);stopCamera();
   area=next;products=[];assets=[];toolReferences=[];loans=[];selectedAssetId=null;pickedTool=null;inventoryPage=1;toolPage=1;historyPage=1;
-  for(const id of ['filter','module-filter','inventory-kind','inventory-status','scan-product','asset-search','tool-module-filter','tool-status-filter','history-worker','movement-reason'])$(id).value='';
-  $('worker-code').value='';$('loan-notes').value='';
+  for(const id of ['filter','module-filter','inventory-kind','inventory-category','inventory-status','scan-product','asset-search','tool-module-filter','tool-status-filter','history-worker','history-from','history-to','history-asset','history-module','history-location','movement-reason'])$(id).value='';
+  $('worker-code').value='';$('loan-notes').value='';$('self-credential').value='';
   $('product-search-results').hidden=true;
   $('movement-type').value='consumo';
   for(const id of ['movement-product','edit-product','adjust-product','asset-product'])$(id).replaceChildren();
@@ -56,28 +115,30 @@ function selectArea(next,tab=activeTab==='prestamos'?'prestamos':'inventario'){
   $('inventory-heading').textContent=area==='taller'?areaNames.taller:'Inventario del Cuarto de Válvulas';
   $('loans-heading').textContent='Herramientas y préstamos · '+areaNames[area];
   $('dashboard-heading').textContent='Panel de control ? '+areaNames[area];
-  $('asset-verified-wrap').hidden=area!=='taller';
-  $('asset-verified').required=area==='taller';
+  $('asset-verified').required=true;
   $('asset-verified').checked=false;
   $('adjust-verified').checked=false;
   switchTab(tab);
 }
 function switchTab(tab){
+  if(!isAdmin()&&['admin','movimientos'].includes(tab))return;
   activeTab=tab;
+  $('catalog-admin').hidden=tab!=='admin';
   document.querySelectorAll('.tab').forEach(e=>e.hidden=e.id!==tab);
   document.querySelectorAll('nav button').forEach(button=>button.classList.toggle('selected',button.dataset.tab===tab));
   updateWorkerPanel();
   if(tab==='dashboard')dashboard().catch(e=>notice(e.message));
+  if(tab==='admin')loadCatalogAdmin().catch(e=>notice(e.message));
   if(['inventario','movimientos','admin'].includes(tab))load().catch(e=>notice(e.message));
   if(tab==='prestamos')refreshLoans();
   if(tab!=='prestamos')closeReturn();
   if(tab==='movimientos'||tab==='prestamos'){
-    const code=area==='taller'&&!me?.credentialVerified?'worker-code':tab==='movimientos'?'scan-product':'asset-search';
+    const code=tab==='prestamos'&&!isAdmin()&&workshopMode==='AUTOSERVICIO'?'self-credential':tab==='movimientos'?'scan-product':'asset-search';
     $(code).focus({preventScroll:true});
   }
 }
 function updateWorkerPanel(){
-  const needsWorker=area==='taller'&&['movimientos','prestamos','admin'].includes(activeTab);
+  const needsWorker=isAdmin()&&area==='taller'&&['movimientos','admin'].includes(activeTab);
   $('worker-panel').hidden=!needsWorker;
   $('worker-form').hidden=Boolean(me?.credentialVerified);
   $('worker-feedback').textContent=me?.credentialVerified?`Credencial verificada · ${me.name}`:'';
@@ -104,22 +165,25 @@ function workerReady(){
 }
 async function dashboard(){
   const revision=areaRevision;
-  const [d,workers]=await Promise.all([api(areaEndpoint('/dashboard')),api('/workers')]);
+  const [d,workers]=await Promise.all([api(areaEndpoint('/dashboard')),isAdmin()?api('/workers'):[]]);
   if(revision!==areaRevision)return;
   const stats=[['Referencias',d.summary.products],['Unidades contabilizadas',d.summary.units],
     ['Sin conteo',d.summary.uncounted],['Pendientes de validación',d.summary.pending],
-    ['Herramientas prestadas',d.loans],['Herramientas disponibles',d.available]];
+    ['Unidades físicas',d.tools.physical],['Disponibles',d.available],['Prestadas / abiertas',d.loans],['En mantenimiento',d.tools.maintenance],['Dadas de baja',d.tools.retired],['Préstamos vencidos',d.tools.overdue],['Usuarios activos',d.active_users]];
   $('kpis').innerHTML=stats.map(([label,value])=>`<div class="kpi"><span>${label}</span><strong>${countedUnits(value)}</strong></div>`).join('');
   $('modules').innerHTML=d.modules.map(x=>`<div class="module"><b>${escapeHtml(x.name)}</b><p class="small">${escapeHtml(x.inventory_status.replaceAll('_',' '))}</p><strong>${x.products}</strong><span> referencias</span><p>${x.units===null?'Sin conteo':countedUnits(x.units)+' unidades registradas'}</p></div>`).join('');
   $('low-stock').innerHTML=table(['Artículo','Código','Ubicación','Cantidad','Mínimo'],d.low.map(p=>[p.name,p.barcode||'—',p.location,p.stock_units,p.min_stock_units]));
   const selector=$('history-worker'),previous=selector.value;
   selector.innerHTML='<option value="">Todos los trabajadores</option>'+workers.map(w=>`<option value="${w.id}">${escapeHtml(w.full_name)}</option>`).join('');
   if(workers.some(w=>String(w.id)===previous))selector.value=previous;
+  setFilterOptions('history-module',d.modules.map(module=>[module.id,module.name]),'Todos los módulos');
+  setFilterOptions('history-location',d.locations,'Todas las ubicaciones');
+  showMode(d.mode);
   await renderHistory();
 }
 async function renderHistory(){
   const sequence=++historySequence,userId=$('history-worker').value,page=historyPage;
-  const {rows,hasMore}=await api(areaEndpoint('/history',{page,...(userId?{user_id:userId}:{})}));
+  const {rows,hasMore}=await api(areaEndpoint('/history',{page,...historyFilters(userId)}));
   if(sequence!==historySequence)return;
   $('recent').innerHTML=table(['Fecha','Trabajador','Artículo','Operación','Cantidad','Observaciones'],
     rows.map(x=>[dateLabel(x.created_at),x.collaborator||'—',x.asset_barcode?`${x.product} (${x.asset_barcode})`:x.product,
@@ -128,23 +192,43 @@ async function renderHistory(){
   $('history-next').disabled=!hasMore;
   $('history-page').textContent=`Página ${page}`;
 }
+function historyFilters(userId=$('history-worker').value){
+  return Object.fromEntries([['user_id',userId],['from',$('history-from').value],['to',$('history-to').value],
+    ['asset_barcode',$('history-asset').value.trim()],['module_id',$('history-module').value],['location',$('history-location').value]].filter(([,value])=>value));
+}
+function setFilterOptions(id,options,placeholder){
+  const dropdown=$(id), previous=dropdown.value;
+  dropdown.replaceChildren(new Option(placeholder,''));
+  for(const value of options){
+    const [key,label]=Array.isArray(value)?value:[value,value];
+    dropdown.add(new Option(label,key));
+  }
+  if([...dropdown.options].some(option=>option.value===previous))dropdown.value=previous;
+}
 function table(headers,rows){return '<div class="table-wrap"><table><thead><tr>'+headers.map(h=>'<th>'+escapeHtml(h)+'</th>').join('')+'</tr></thead><tbody>'+ (rows.length?rows.map(row=>'<tr>'+row.map(c=>'<td>'+escapeHtml(c)+'</td>').join('')+'</tr>').join(''):'<tr><td colspan="'+headers.length+'">No hay datos registrados</td></tr>')+'</tbody></table></div>'}
 function filterProducts(reset=false){
   if(reset)inventoryPage=1;
   const q=$('filter').value.trim().toLowerCase(),location=$('module-filter').value;
-  const kind=$('inventory-kind').value,status=$('inventory-status').value;
+  const kind=$('inventory-kind').value,status=$('inventory-status').value,category=$('inventory-category').value;
   const statusMatches={
     active:p=>p.active,inactive:p=>!p.active,unknown:p=>p.stock_units===null,
     available:p=>p.availability.startsWith('Disponible'),loaned:p=>p.availability==='Prestada'
   };
   const matches=products.filter(p=>(!location||p.location===location)&&(!kind||p.kind===kind)
-    &&(!status||statusMatches[status](p))&&[p.name,p.sap_code,p.barcode,p.location].some(v=>String(v??'').toLowerCase().includes(q)));
+    &&(!category||p.category===category)&&(!status||statusMatches[status](p))&&[p.name,p.sap_code,p.barcode,p.location,p.brand,p.model,p.measure,p.capacity,p.category].some(v=>String(v??'').toLowerCase().includes(q)));
   const size=25,pages=Math.max(1,Math.ceil(matches.length/size));
   inventoryPage=Math.min(inventoryPage,pages);
   const start=(inventoryPage-1)*size;
-  $('product-list').innerHTML=table(['Código de barras','Artículo','SAP','Cantidad','Ubicación','Tipo','Estado','Disponibilidad','Último responsable','Actualización'],
-    matches.slice(start,start+size).map(p=>[p.barcode||'—',p.name,p.sap_code||'—',p.stock_units??'Sin conteo',
+  const visible=matches.slice(start,start+size),adminView=isAdmin();
+  $('product-list').innerHTML=table([...(adminView?['Acción']:[]),'Código de barras','Artículo','SAP','Cantidad','Ubicación','Tipo','Estado','Disponibilidad','Último responsable','Actualización'],
+    visible.map(p=>[...(adminView?['']:[]),p.barcode||'—',p.name,p.sap_code||'—',p.stock_units??'Sin conteo',
       p.location_validated?p.location:p.location+' (según registro)',p.kind,p.active?'Activo':'Por validar',p.availability,p.last_worker||'—',dateLabel(p.updated_at)]));
+  if(adminView)visible.forEach((product,index)=>{
+    const button=document.createElement('button');
+    button.type='button';button.textContent='Editar';button.setAttribute('aria-label',`Editar ${product.name}`);
+    button.onclick=()=>{switchTab('admin');$('edit-product').value=product.id;updateEdit();$('edit-name').focus();};
+    $('product-list').querySelector('tbody').rows[index].firstElementChild.append(button);
+  });
   $('inventory-page').textContent=`Página ${inventoryPage} de ${pages} · ${matches.length} referencias`;
   $('inventory-prev').disabled=inventoryPage===1;
   $('inventory-next').disabled=inventoryPage===pages;
@@ -152,7 +236,9 @@ function filterProducts(reset=false){
 function updateEdit(){
   const p=products.find(x=>String(x.id)===$('edit-product').value);
   for(const [key,val] of [['name',p?.name],['sap',p?.sap_code],['barcode',p?.barcode],['kind',p?.kind],['pack',p?.units_per_pack],['min',p?.min_stock_units],['notes',p?.notes]])$('edit-'+key).value=val??'';
-  $('edit-barcode').readOnly=area==='taller';
+  $('edit-barcode').readOnly=Boolean(p?.barcode);
+  for(const key of ['brand','model','measure','capacity','category','specifications'])$('edit-'+key).value=p?.[key]??'';
+  renderProductLocations(p);
   $('edit-active').checked=!!p?.active;
   $('edit-retire-assets').checked=false;
   updateRetireAssets(p);
@@ -218,9 +304,9 @@ function referenceStatus(reference){
 function renderTools(resetPage=false){
   if(resetPage){toolPage=1;pickedTool=null}
   const query=$('asset-search').value.trim();
-  const rows=ToolAvailability.filterToolAssets([...assets,...toolReferences],{
-    query,location:$('tool-module-filter').value,status:$('tool-status-filter').value
-  });
+  const status=$('tool-status-filter').value;
+  const rows=ToolAvailability.filterToolAssets([...assets,...toolReferences],{query,location:$('tool-module-filter').value,status})
+    .filter(row=>status!=='disponible'||assetAvailability(row).available);
   const code=query.toUpperCase();
   const selected=pickedTool
     ?(pickedTool.is_reference?toolReferences:assets).find(row=>row.id===pickedTool.id)
@@ -263,7 +349,7 @@ function renderTools(resetPage=false){
   selectedAssetId=asset?.id??null;
   if(selected?.is_reference)showToolReference(selected);
   else showAssetDetails(asset);
-  $('loan-asset').disabled=loanPending||!asset||!assetAvailability(asset).available;
+  $('loan-asset').disabled=loanPending||!canOperateTools()||!asset||!assetAvailability(asset).available;
   const open=asset&&loans.find(loan=>loan.asset_id===asset.id&&!loan.returned_at);
   $('return-asset').hidden=!open||!canReturn(open);
   $('return-asset').onclick=()=>openReturn(open);
@@ -278,17 +364,17 @@ function showToolReference(reference){
     <div><dt>Estado</dt><dd>${referenceStatus(reference)}</dd></div>
     </dl><p class="small">El préstamo requiere una unidad física validada con código individual.</p>`;
 }
-function showAssetDetails(a){const box=$('asset-details');if(!a){box.hidden=true;box.innerHTML='';return}const availability=assetAvailability(a),storedStatus=a.asset_status==='mantenimiento'&&!Number(a.active)?'Mantenimiento (estado temporal registrado)':a.asset_status;const validationForm=me?.role==='administrador'&&(!Number(a.active)||area==='taller'&&a.asset_status==='mantenimiento')&&!['baja','prestada'].includes(a.asset_status)?`<form id="validate-asset-form" data-asset-id="${a.id}"><label class="check"><input type="checkbox" name="physical_verification" required> Confirmo que verifiqué físicamente el conjunto y su ubicación.</label><label>Motivo / observación de validación<textarea name="reason" rows="2" required minlength="5" placeholder="Indica qué se verificó"></textarea></label><button class="primary" type="submit">Validar y habilitar esta herramienta</button></form>`:'';box.hidden=false;box.innerHTML=`<strong>${escapeHtml(a.name)}</strong><dl><div><dt>Ubicación</dt><dd>${escapeHtml(a.location||a.module)}</dd></div><div><dt>Código de herramienta/conjunto</dt><dd>${escapeHtml(a.asset_barcode)}</dd></div><div><dt>Código de barras del producto</dt><dd>${escapeHtml(a.product_barcode||'—')}</dd></div><div><dt>Código SAP</dt><dd>${escapeHtml(a.sap_code||'—')}</dd></div><div><dt>Estado registrado</dt><dd>${escapeHtml(storedStatus)}</dd></div><div><dt>Disponibilidad</dt><dd>${escapeHtml(availability.label)}</dd></div>${a.borrower?`<div><dt>En poder de</dt><dd>${escapeHtml(a.borrower)}</dd></div><div><dt>Fecha de préstamo</dt><dd>${escapeHtml(dateLabel(a.loaned_at))}</dd></div>`:''}</dl><p class="small">${escapeHtml(availability.reason)}</p>${a.description?`<p class="small">Descripción: ${escapeHtml(a.description)}</p>`:''}${validationForm}`}
+function showAssetDetails(a){const box=$('asset-details');if(!a){box.hidden=true;box.innerHTML='';return}const availability=assetAvailability(a),storedStatus=a.asset_status==='mantenimiento'&&!Number(a.active)?'Mantenimiento (estado temporal registrado)':a.asset_status;const assetActions=`<div class="buttonline"><button type="button" data-asset-history="${a.id}">Historial individual</button>${isAdmin()?`<button type="button" data-asset-label="${a.id}">Imprimir etiqueta</button>`:''}</div><div id="asset-history-result"></div>${isAdmin()?assetEditor(a):''}`;const validationForm=me?.role==='administrador'&&(!Number(a.active)||a.asset_status==='mantenimiento')&&!['baja','prestada'].includes(a.asset_status)?`<form id="validate-asset-form" data-asset-id="${a.id}"><label class="check"><input type="checkbox" name="physical_verification" required> Confirmo que verifiqué físicamente el conjunto y su ubicación.</label><label>Motivo / observación de validación<textarea name="reason" rows="2" required minlength="5" placeholder="Indica qué se verificó"></textarea></label><button class="primary" type="submit">Validar y habilitar esta herramienta</button></form>`:'';box.hidden=false;box.innerHTML=`<strong>${escapeHtml(a.name)}</strong><dl><div><dt>Ubicación</dt><dd>${escapeHtml(a.location||a.module)}</dd></div><div><dt>Código de herramienta/conjunto</dt><dd>${escapeHtml(a.asset_barcode)}</dd></div><div><dt>Código de barras del producto</dt><dd>${escapeHtml(a.product_barcode||'—')}</dd></div><div><dt>Código SAP</dt><dd>${escapeHtml(a.sap_code||'—')}</dd></div><div><dt>Estado registrado</dt><dd>${escapeHtml(storedStatus)}</dd></div><div><dt>Disponibilidad</dt><dd>${escapeHtml(availability.label)}</dd></div>${a.borrower?`<div><dt>En poder de</dt><dd>${escapeHtml(a.borrower)}</dd></div><div><dt>Fecha de préstamo</dt><dd>${escapeHtml(dateLabel(a.loaned_at))}</dd></div>`:''}</dl><p class="small">${escapeHtml(availability.reason)}</p>${a.description?`<p class="small">Descripción: ${escapeHtml(a.description)}</p>`:''}${validationForm}${assetActions}`}
 function canReturn(loan){
-  return !!loan&&!loan.returned_at&&(area!=='taller'||me?.role!=='colaborador'||Number(me.id)===Number(loan.borrower_id));
+  return !!loan&&!loan.returned_at&&canOperateTools()&&(isAdmin()||Number(me.id)===Number(loan.borrower_id));
 }
 function openReturn(loan){
-  if(!canReturn(loan)||!workerReady())return;
+  if(!canReturn(loan))return;
   returnLoan=loan;
   $('return-title').textContent='Devolver '+loan.asset_barcode;
   $('return-condition').value='Correcta';
   $('return-maintenance').checked=false;
-  $('return-maintenance-wrap').hidden=area!=='taller';
+  $('return-maintenance-wrap').hidden=false;
   $('return-form').hidden=false;
   $('return-condition').focus();
 }
@@ -301,17 +387,21 @@ async function refreshLoans(){
   const revision=areaRevision;
   try{
     const result=await Promise.all([api(areaEndpoint('/tools')),api(areaEndpoint('/loans')),
-      area==='taller'?api(areaEndpoint('/products')):[]]);
+      area==='taller'?api(areaEndpoint('/products')):[],api('/workshop/mode'),isAdmin()?api('/workers'):[],isAdmin()?api('/admin/catalog'):null]);
     if(revision!==areaRevision)return;
     [assets,loans]=result;
+    if(isAdmin()){
+      catalog=result[5];
+      setFilterOptions('loan-borrower',result[4].filter(u=>u.active).map(u=>[u.id,u.full_name]),'Mi usuario');
+    }
     toolReferences=ToolAvailability.workshopToolReferences(result[2],assets);
     const moduleFilter=$('tool-module-filter'),selectedModule=moduleFilter.value;
     const locations=[...new Set([...assets,...toolReferences].map(row=>row.location))].sort((a,b)=>a.localeCompare(b,'es'));
     moduleFilter.innerHTML='<option value="">Todas las ubicaciones</option>'+locations.map(location=>`<option>${escapeHtml(location)}</option>`).join('');
     if(locations.includes(selectedModule))moduleFilter.value=selectedModule;
-    renderTools();
-    $('loans-list').innerHTML='<div class="table-wrap"><table><thead><tr><th>Herramienta</th><th>Prestatario</th><th>Salida</th><th>Devolución</th><th>Condición</th><th>Estado actual</th><th>Acción</th></tr></thead><tbody>'+
-      (loans.length?loans.map(l=>`<tr><td>${escapeHtml(l.asset_barcode)}</td><td>${escapeHtml(l.collaborator)}</td><td>${escapeHtml(dateLabel(l.loaned_at))}</td><td>${escapeHtml(dateLabel(l.returned_at))}</td><td>${escapeHtml(l.return_condition||'—')}</td><td>${escapeHtml(l.asset_status)}</td><td>${canReturn(l)?`<button type="button" data-return="${l.id}">Devolver</button>`:'—'}</td></tr>`).join(''):'<tr><td colspan="7">No hay préstamos registrados</td></tr>')+'</tbody></table></div>';
+    showMode(result[3]);
+    $('loans-list').innerHTML='<div class="table-wrap"><table><thead><tr><th>Herramienta</th><th>Prestatario</th><th>Salida</th><th>Vence</th><th>Devolución</th><th>Condición</th><th>Estado actual</th><th>Acción</th></tr></thead><tbody>'+
+      (loans.length?loans.map(l=>`<tr><td>${escapeHtml(l.asset_barcode)}</td><td>${escapeHtml(l.collaborator)}</td><td>${escapeHtml(dateLabel(l.loaned_at))}</td><td>${escapeHtml(dateLabel(l.due_at))}</td><td>${escapeHtml(dateLabel(l.returned_at))}</td><td>${escapeHtml(l.return_condition||'—')}</td><td>${escapeHtml(l.asset_status)}</td><td>${canReturn(l)?`<button type="button" data-return="${l.id}">Devolver</button>`:'—'}</td></tr>`).join(''):'<tr><td colspan="8">No hay préstamos registrados</td></tr>')+'</tbody></table></div>';
   }catch(e){if(revision===areaRevision)notice(e.message)}
 }
 function finishScan(dest,code){
@@ -319,8 +409,9 @@ function finishScan(dest,code){
   stopCamera();
   if(dest==='login-scan-code')identifyLoginCode(code);
   else if(dest==='worker-code')confirmWorker().catch(e=>notice(e.message));
+  else if(dest==='self-credential')$('asset-search').focus();
   else if(dest==='scan-product')searchProducts(code);
-  else renderTools(true);
+  else handleToolScan();
 }
 function loadZXing(){if(window.ZXingBrowser)return Promise.resolve();if(!zxingLoadPromise)zxingLoadPromise=new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='/vendor/zxing/zxing-browser.min.js';script.onload=resolve;script.onerror=()=>{zxingLoadPromise=null;reject(Error('No se pudo cargar el lector de cámara. Usa un lector USB o escribe el código.'))};document.head.appendChild(script)});return zxingLoadPromise}
 async function scanWithZXing(dest,revision){
@@ -386,21 +477,21 @@ function stopCamera(){
   $('camera-video').srcObject=null;
   $('camera-modal').hidden=true;
 }
-$('camera-close').onclick=stopCamera;$('camera-product').onclick=()=>camera('scan-product');$('camera-asset').onclick=()=>camera('asset-search');$('login-camera').onclick=()=>camera('login-scan-code');$('logout').onclick=logout;
+$('camera-close').onclick=stopCamera;$('camera-product').onclick=()=>camera('scan-product');$('camera-asset').onclick=()=>camera('asset-search');$('login-camera').onclick=()=>camera('login-scan-code');$('logout').onclick=()=>logout();
 document.querySelectorAll('[data-login-method]').forEach(button=>button.onclick=()=>setLoginMethod(button.dataset.loginMethod));
 $('login-scan-code').oninput=()=>{identifiedScanCode='';loginIdentifySequence++;clearTimeout(loginCodeTimer);const code=$('login-scan-code').value.trim();if(!code){$('login-identify-message').textContent='El escaneo identifica tu usuario, pero no inicia sesión.';$('login-identify-message').className='login-feedback';return}$('login-identify-message').textContent='';loginCodeTimer=setTimeout(()=>identifyLoginCode(code),350)};
 $('login-scan-code').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();clearTimeout(loginCodeTimer);identifyLoginCode($('login-scan-code').value)}};
-$('login-form').onsubmit=async e=>{e.preventDefault();try{let credentials={password:$('login-password').value};if(loginMethod==='select'){if(!$('login-user').value)throw Error('Selecciona tu nombre de la lista.');credentials.user_id=Number($('login-user').value)}else if(loginMethod==='manual'){credentials.barcode=$('login-manual-code').value.trim()}else{const code=$('login-scan-code').value.trim();if(!code)throw Error('Escanea o escribe el código de tu credencial.');if(identifiedScanCode!==code&&!await identifyLoginCode(code))throw Error('No se pudo identificar el código. Revisa la credencial e inténtalo nuevamente.');credentials.barcode=code}const response=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(credentials)});const result=await response.json().catch(()=>({}));if(!response.ok)throw Error(result.error||'No se pudo iniciar sesión.');token=result.token;me=result.user;sessionStorage.setItem('invtoken',token);sessionStorage.setItem('invme',JSON.stringify(me));$('login-password').value='';showApp()}catch(ex){$('login-password').value='';notice(ex.message)}};
+$('login-form').onsubmit=async e=>{e.preventDefault();try{let credentials={password:$('login-password').value};if(loginMethod==='select'){if(!$('login-user').value)throw Error('Selecciona tu nombre de la lista.');credentials.user_id=Number($('login-user').value)}else if(loginMethod==='manual'){credentials.barcode=$('login-manual-code').value.trim()}else{const code=$('login-scan-code').value.trim();if(!code)throw Error('Escanea o escribe el código de tu credencial.');if(identifiedScanCode!==code&&!await identifyLoginCode(code))throw Error('No se pudo identificar el código. Revisa la credencial e inténtalo nuevamente.');credentials.barcode=code}const response=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(credentials)});const result=await response.json().catch(()=>({}));if(!response.ok)throw Error(result.error||'No se pudo iniciar sesión.');token=result.token;me=result.user;idleSeconds=result.idleSeconds;sessionStorage.setItem('invtoken',token);sessionStorage.setItem('invme',JSON.stringify(me));$('login-password').value='';showApp()}catch(ex){$('login-password').value='';notice(ex.message)}};
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
 document.querySelectorAll('[data-area]').forEach(button=>button.onclick=()=>{if(button.dataset.area!==area)selectArea(button.dataset.area)});
 $('filter').oninput=()=>filterProducts(true);
-for(const id of ['module-filter','inventory-kind','inventory-status'])$(id).onchange=()=>filterProducts(true);
+for(const id of ['module-filter','inventory-kind','inventory-category','inventory-status'])$(id).onchange=()=>filterProducts(true);
 $('inventory-prev').onclick=()=>{inventoryPage--;filterProducts()};
 $('inventory-next').onclick=()=>{inventoryPage++;filterProducts()};
 function changeHistoryPage(page){historyPage=page;renderHistory().catch(e=>notice(e.message))}
 $('history-prev').onclick=()=>changeHistoryPage(historyPage-1);
 $('history-next').onclick=()=>changeHistoryPage(historyPage+1);
-$('history-worker').onchange=()=>changeHistoryPage(1);
+for(const id of ['history-worker','history-from','history-to','history-asset','history-module','history-location'])$(id).onchange=()=>changeHistoryPage(1);
 $('worker-camera').onclick=()=>camera('worker-code');
 $('worker-form').onsubmit=e=>{e.preventDefault();confirmWorker().catch(ex=>notice(ex.message))};
 $('adjust-product').onchange=updateAdjust;
@@ -414,7 +505,42 @@ $('selected-product-details').onclick=e=>{
 
 $('scan-product').oninput=scheduleProductSearch;$('scan-product').onchange=()=>searchProducts();$('scan-product').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();clearTimeout(searchTimer);searchProducts()}};$('find-product').onclick=()=>{clearTimeout(searchTimer);searchProducts()};$('product-search-results').onclick=e=>{const btn=e.target.closest('[data-search-product]');if(!btn)return;const p=products.find(x=>String(x.id)===btn.dataset.searchProduct);if(p)selectMovementProduct(p);$('product-search-results').hidden=true};
 $('asset-search').oninput=()=>renderTools(true);
-$('asset-search').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();renderTools(true)}};
+$('asset-search').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();handleToolScan()}};
+$('self-credential-camera').onclick=()=>camera('self-credential');
+$('self-credential').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();$('asset-search').focus()}};
+$('self-action').onchange=()=>{
+  $('self-damage-wrap').hidden=$('self-action').value!=='return';
+  $('self-damage').checked=false;
+};
+function handleToolScan(){
+  renderTools(true);
+  if(!isAdmin()&&$('asset-search').value.trim())executeSelfScan($('asset-search').value.trim(),$('self-action').value);
+}
+async function executeSelfScan(code,operation){
+  if(loanPending||!me)return;
+  if(!canOperateTools()){
+    await refreshMode().catch(e=>notice(e.message));
+    if(!canOperateTools())return notice('El administrador debe habilitar el autoservicio.');
+  }
+  const credential=$('self-credential'), employee_barcode=credential.value.trim();
+  if(!employee_barcode){credential.focus();return notice('Escanea primero tu credencial de trabajador.');}
+  credential.value='';
+  loanPending=true;
+  const revision=areaRevision;
+  try{
+    const notes=$('loan-notes').value.trim();
+    if(operation==='return'){
+      const maintenance=$('self-damage').checked;
+      await scopedPost('/loans/return-by-code',{asset_barcode:code,employee_barcode,condition:notes||(maintenance?'Daño reportado en autoservicio':'Correcta'),maintenance});
+      notice(maintenance?'Devolución registrada para revisión.':'Devolución registrada.');
+    }else{
+      await scopedPost('/loans',{asset_barcode:code,employee_barcode,request_id:crypto.randomUUID(),notes});
+      notice('Préstamo registrado.');
+    }
+    if(revision===areaRevision){$('loan-notes').value='';$('asset-search').value='';$('self-damage').checked=false;await refreshLoans();}
+  }catch(e){notice(e.message);if(token)await refreshMode().catch(()=>{});}
+  finally{loanPending=false;if(me&&revision===areaRevision){renderTools();credential.focus();}}
+}
 $('tool-module-filter').onchange=$('tool-status-filter').onchange=()=>renderTools(true);
 $('tools-prev').onclick=()=>{toolPage--;renderTools()};
 $('tools-next').onclick=()=>{toolPage++;renderTools()};
@@ -443,22 +569,23 @@ $('movement-form').onsubmit=async e=>{
   }
 };
 $('edit-kind').onchange=()=>updateRetireAssets();
-$('edit-product').onchange=updateEdit;$('edit-product-form').onsubmit=async e=>{e.preventDefault();try{await scopedPost('/admin/products/'+$('edit-product').value,{name:$('edit-name').value,sap_code:$('edit-sap').value,barcode:$('edit-barcode').value,kind:$('edit-kind').value,units_per_pack:$('edit-pack').value,min_stock_units:$('edit-min').value,notes:$('edit-notes').value,active:$('edit-active').checked,retire_assets:$('edit-retire-assets').checked},'PATCH');notice('Producto actualizado');await load()}catch(ex){notice(ex.message)}};
+$('edit-product').onchange=updateEdit;$('edit-product-form').onsubmit=async e=>{e.preventDefault();try{await scopedPost('/admin/products/'+$('edit-product').value,{name:$('edit-name').value,sap_code:$('edit-sap').value,barcode:$('edit-barcode').value,kind:$('edit-kind').value,units_per_pack:$('edit-pack').value,min_stock_units:$('edit-min').value,notes:$('edit-notes').value,active:$('edit-active').checked,retire_assets:$('edit-retire-assets').checked,details:editDetails()},'PATCH');notice('Producto actualizado');await load()}catch(ex){notice(ex.message)}};
 $('adjust-form').onsubmit=async e=>{e.preventDefault();if(!workerReady())return;if(!confirm('Este ajuste queda registrado en auditoría. ¿Continuar?'))return;try{await scopedPost('/admin/adjust',{product_id:Number($('adjust-product').value),new_stock_units:Number($('adjust-stock').value),reason:$('adjust-reason').value,physical_verification:$('adjust-verified').checked});notice('Ajuste registrado');await load()}catch(ex){notice(ex.message)}};
-$('new-user-form').onsubmit=async e=>{e.preventDefault();try{await post('/admin/users',Object.fromEntries(new FormData(e.target)));e.target.reset();notice('Colaborador registrado')}catch(ex){notice(ex.message)}};
-$('new-asset-form').onsubmit=async e=>{e.preventDefault();try{await scopedPost('/admin/tools',{product_id:Number($('asset-product').value),asset_barcode:$('new-asset-code').value.trim(),description:$('new-asset-description').value,physical_verification:$('asset-verified').checked});notice('Herramienta individual registrada');e.target.reset()}catch(ex){notice(ex.message)}};
+$('new-user-form').onsubmit=async e=>{e.preventDefault();try{await post('/admin/users',Object.fromEntries(new FormData(e.target)));e.target.reset();notice('Colaborador registrado');await loadCatalogAdmin()}catch(ex){notice(ex.message)}};
+$('new-asset-form').onsubmit=async e=>{e.preventDefault();try{await scopedPost('/admin/tools',{product_id:Number($('asset-product').value),asset_barcodes:$('new-asset-code').value.split(/\r?\n/).map(code=>code.trim()).filter(Boolean),location_id:$('new-asset-location').value||null,description:$('new-asset-description').value,physical_verification:$('asset-verified').checked});notice('Unidades físicas registradas');e.target.reset();await loadCatalogAdmin()}catch(ex){notice(ex.message)}};
 $('loan-asset').onclick=async()=>{
-  if(loanPending||!workerReady())return;
+  if(loanPending||!canOperateTools())return;
   const asset=assets.find(a=>a.id===selectedAssetId);
   if(!asset)return notice('Escanea o escribe el código único de una herramienta registrada.');
   const availability=assetAvailability(asset);
   if(!availability.available)return notice(availability.reason);
-  if(!confirm(`¿Registrar préstamo de ${asset.name} a tu usuario?`))return;
+  if(!isAdmin()){await executeSelfScan(asset.asset_barcode,'loan');return}
+  if(!confirm(`¿Registrar préstamo de ${asset.name}?`))return;
   const revision=areaRevision;
   loanPending=true;
   $('loan-asset').disabled=true;
   try{
-    await scopedPost('/loans',{asset_id:asset.id,request_id:crypto.randomUUID(),notes:$('loan-notes').value});
+    await scopedPost('/loans',{asset_id:asset.id,request_id:crypto.randomUUID(),notes:$('loan-notes').value,borrower_id:$('loan-borrower').value||null,due_at:$('loan-due').value?new Date($('loan-due').value).toISOString():null});
     notice('Préstamo registrado');
     if(revision===areaRevision){$('loan-notes').value='';await refreshLoans()}
   }catch(ex){notice(ex.message)}
@@ -471,22 +598,27 @@ $('loans-list').onclick=e=>{
 $('cancel-return').onclick=()=>{closeReturn();renderTools()};
 $('return-form').onsubmit=async e=>{
   e.preventDefault();
-  if(!returnLoan||!workerReady())return;
+  if(!returnLoan||!canOperateTools())return;
+  const employee_barcode=isAdmin()?undefined:$('self-credential').value.trim();
+  if(!isAdmin()&&!employee_barcode)return notice('Escanea tu credencial.');
   const submit=e.submitter;
   submit.disabled=true;
   try{
-    await scopedPost('/loans/'+returnLoan.id+'/return',{condition:$('return-condition').value,maintenance:$('return-maintenance').checked});
+    await scopedPost('/loans/'+returnLoan.id+'/return',{condition:$('return-condition').value,maintenance:$('return-maintenance').checked,employee_barcode});
+    $('self-credential').value='';
     closeReturn();notice('Devolución registrada');await refreshLoans();
   }catch(ex){notice(ex.message)}finally{submit.disabled=false}
 };
-async function downloadExcel(worker=''){
+async function downloadExcel(filters={}){
   const currentArea=area;
-  const blob=await api(areaEndpoint('/export',worker?{user_id:worker}:{}));
+  const blob=await api(areaEndpoint('/export',filters));
   const url=URL.createObjectURL(blob),a=document.createElement('a');
   a.href=url;a.download=currentArea==='taller'?'Inventario_Taller.xlsx':'Inventario_Cuarto_Valvulas.xlsx';
   document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 $('export').onclick=()=>downloadExcel().catch(e=>notice(e.message));
-$('export-history').onclick=()=>downloadExcel($('history-worker').value).catch(e=>notice(e.message));
+$('export-history').onclick=()=>downloadExcel(historyFilters()).catch(e=>notice(e.message));
 setLoginMethod('select');
-if(token&&me){showApp()}else loadLoginUsers().catch(e=>notice(e.message))
+if(token){
+  api('/session').then(result=>{me=result.user;idleSeconds=result.idleSeconds;showApp()}).catch(error=>{if(token)logout(false);notice(error.message)});
+}else loadLoginUsers().catch(e=>notice(e.message))

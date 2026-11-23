@@ -5,7 +5,8 @@
   <button type="button" data-area="valvulas" aria-pressed="true">Cuarto de Válvulas</button>
   <button type="button" data-area="taller" aria-pressed="false">Inventario de Taller</button>
 </div>
-<nav id="nav"><button class="selected" data-tab="dashboard">Dashboard</button><button data-tab="inventario">Inventario</button><button data-tab="movimientos">Escanear / mover</button><button data-tab="prestamos">Préstamos</button><button data-tab="admin" class="admin-only">Administración</button></nav><main>
+<nav id="nav"><button class="selected" data-tab="dashboard">Dashboard</button><button data-tab="inventario">Inventario</button><button data-tab="movimientos" class="admin-only">Escanear / mover</button><button data-tab="prestamos">Préstamos</button><button data-tab="admin" class="admin-only">Administración</button></nav><main>
+<div class="toolbar" id="workshop-mode-bar"><strong id="workshop-mode-label" aria-live="polite">Consultando modo del Taller…</strong><button type="button" id="workshop-mode-toggle" class="admin-only" disabled>Cambiar modo</button></div>
 <div id="worker-panel" class="panel worker-panel" hidden>
   <form id="worker-form">
     <label for="worker-code">Confirma tu credencial para operar en el Taller</label>
@@ -19,7 +20,11 @@
 </div>
 <section id="dashboard" class="tab"><div class="heading"><h1 id="dashboard-heading">Panel de control</h1><p>Indicadores actualizados desde MySQL.</p></div><div id="kpis" class="kpis"></div><h2>Inventario por módulo</h2><div id="modules" class="cards"></div><h2>Stock bajo</h2><div id="low-stock"></div>
 <h2>Movimientos recientes e historial por trabajador</h2>
-<div class="toolbar"><select id="history-worker" aria-label="Trabajador"><option value="">Todos los trabajadores</option></select><button id="export-history" class="admin-only" type="button">Descargar Excel</button></div>
+<div class="toolbar"><select id="history-worker" aria-label="Trabajador"><option value="">Todos los trabajadores</option></select><input id="history-from" aria-label="Desde" type="date"><input id="history-to" aria-label="Hasta" type="date">
+<input id="history-asset" aria-label="Código individual" placeholder="Código individual">
+<select id="history-module" aria-label="Módulo"><option value="">Todos los módulos</option></select>
+<select id="history-location" aria-label="Ubicación"><option value="">Todas las ubicaciones</option></select>
+<button id="export-history" class="admin-only" type="button">Descargar Excel</button></div>
 <div id="recent"></div>
 <div class="buttonline pagination"><button id="history-prev" type="button">Anterior</button><span id="history-page" aria-live="polite"></span><button id="history-next" type="button">Siguiente</button></div></section>
 <section id="inventario" class="tab" hidden>
@@ -28,6 +33,7 @@
   <input id="filter" aria-label="Buscar artículos" placeholder="Buscar por nombre, SAP o código de barras">
   <select id="module-filter" aria-label="Ubicación"><option value="">Todas las ubicaciones</option></select>
   <select id="inventory-kind" aria-label="Tipo"><option value="">Todos los tipos</option><option value="consumible">Consumibles</option><option value="herramienta">Herramientas</option><option value="pendiente">Pendientes de clasificación</option></select>
+  <select id="inventory-category" aria-label="Categoría"><option value="">Todas las categorías</option></select>
   <select id="inventory-status" aria-label="Estado"><option value="">Todos los estados</option><option value="active">Activos</option><option value="inactive">Por validar</option><option value="unknown">Sin conteo</option><option value="available">Disponibles</option><option value="loaned">Prestadas</option></select>
   <button class="primary admin-only" id="export">Descargar Excel</button>
 </div>
@@ -35,7 +41,18 @@
 <div class="buttonline pagination"><button id="inventory-prev" type="button">Anterior</button><span id="inventory-page" aria-live="polite"></span><button id="inventory-next" type="button">Siguiente</button></div>
 </section>
 <section id="movimientos" class="tab" hidden><div class="heading"><h1>Registrar entrada o salida</h1><p>Escanea o busca un producto para registrar entradas o retiros. Para prestar o devolver herramientas, abre Préstamos.</p></div><div class="panel narrow"><label>Buscar producto<input id="scan-product" autocomplete="off" placeholder="Código de barras, SAP o nombre del producto"></label><div class="buttonline"><button type="button" id="camera-product">Escanear con cámara</button><button type="button" id="find-product">Buscar producto</button></div><div id="product-search-results" class="search-results" role="listbox" aria-label="Resultados de búsqueda" hidden></div><div id="selected-product-details" class="product-details" aria-live="polite" hidden></div><form id="movement-form"><label>Producto<select id="movement-product" required></select></label><label>Operación<select id="movement-type"><option value="consumo">Retirar / consumir</option><option value="entrada">Ingresar producto</option></select></label><label>Cantidad en unidades<input type="number" id="movement-qty" min="1" step="1" value="1" required></label><label id="movement-reason-wrap"><span id="movement-reason-label">Observaciones</span><textarea id="movement-reason" rows="2" minlength="5" maxlength="255" placeholder="Ej.: reposición confirmada o retiro realizado"></textarea></label><button class="primary" type="submit">Confirmar movimiento</button></form></div></section>
-<section id="prestamos" class="tab" hidden><div class="heading"><h1 id="loans-heading">Herramientas y préstamos</h1><p>Elige un artículo de la lista o escanea su código. Puedes filtrar por ubicación y estado.</p></div><div class="panel"><div id="tools-summary" class="small" aria-live="polite"></div><div class="toolbar"><input id="asset-search" autocomplete="off" placeholder="Buscar o escanear código, nombre, SAP o ubicación"><select id="tool-module-filter" aria-label="Ubicación de la herramienta"><option value="">Todas las ubicaciones</option></select><select id="tool-status-filter" aria-label="Estado de la herramienta"><option value="">Todos los estados</option><option value="validacion">Pendientes de validación</option><option value="disponible">Disponibles</option><option value="prestada">Prestadas</option><option value="mantenimiento">Mantenimiento</option><option value="baja">Dadas de baja</option></select></div><label>Observaciones del préstamo<input id="loan-notes" maxlength="255"></label><div class="buttonline"><button type="button" id="camera-asset">Escanear con cámara</button><button type="button" id="loan-asset" class="primary" disabled>Registrar préstamo</button><button type="button" id="return-asset" hidden>Devolver herramienta</button></div><div id="asset-details" class="product-details" tabindex="-1" aria-live="polite" hidden></div><div id="tools-list"></div>
+<section id="prestamos" class="tab" hidden><div class="heading"><h1 id="loans-heading">Herramientas y préstamos</h1><p>Elige un artículo de la lista o escanea su código. Puedes filtrar por ubicación y estado.</p></div><div class="panel"><div id="self-service-form" class="panel" hidden>
+  <div class="toolbar">
+    <input id="self-credential" placeholder="Primero escanea tu credencial" maxlength="70" autocomplete="off" aria-label="Credencial del trabajador">
+    <button type="button" id="self-credential-camera">Escanear credencial</button>
+    <select id="self-action" aria-label="Operación"><option value="loan">Retirar herramienta</option><option value="return">Devolver herramienta</option></select>
+  </div>
+  <label class="check" id="self-damage-wrap" hidden><input id="self-damage" type="checkbox"> Reportar daño en devolución</label>
+</div>
+<div id="tools-summary" class="small" aria-live="polite"></div><div class="toolbar"><input id="asset-search" autocomplete="off" placeholder="Buscar o escanear código, nombre, SAP o ubicación"><select id="tool-module-filter" aria-label="Ubicación de la herramienta"><option value="">Todas las ubicaciones</option></select><select id="tool-status-filter" aria-label="Estado de la herramienta"><option value="">Todos los estados</option><option value="validacion">Pendientes de validación</option><option value="disponible">Disponibles</option><option value="prestada">Prestadas</option><option value="mantenimiento">Mantenimiento</option><option value="baja">Dadas de baja</option></select></div><div class="toolbar admin-only">
+  <select id="loan-borrower" aria-label="Prestatario"><option value="">Mi usuario</option></select>
+  <label>Vencimiento <input type="datetime-local" id="loan-due"></label>
+</div><label>Observaciones<input id="loan-notes" maxlength="255"></label><div class="buttonline"><button type="button" id="camera-asset">Escanear con cámara</button><button type="button" id="loan-asset" class="primary" disabled>Registrar préstamo</button><button type="button" id="return-asset" hidden>Devolver herramienta</button></div><div id="asset-details" class="product-details" tabindex="-1" aria-live="polite" hidden></div><div id="tools-list"></div>
 <div class="buttonline pagination"><button id="tools-prev" type="button" disabled>Anterior</button><span id="tools-page" aria-live="polite"></span><button id="tools-next" type="button" disabled>Siguiente</button></div>
 <h2>Préstamos registrados</h2><div id="loans-list"></div>
 <form id="return-form" class="product-details" hidden>
@@ -44,6 +61,67 @@
   <label id="return-maintenance-wrap" class="check"><input id="return-maintenance" type="checkbox"> Requiere mantenimiento</label>
   <div class="buttonline"><button class="primary" type="submit">Confirmar devolución</button><button id="cancel-return" type="button">Cancelar</button></div>
 </form></div></section>
-<section id="admin" class="tab" hidden><div class="heading"><h1>Administración</h1><p>Clasificación, autorización, ajustes y colaboradores.</p></div><div class="two-cols"><div class="panel"><h2>Habilitar y editar producto</h2><form id="edit-product-form"><label>Producto<select id="edit-product"></select></label><label>Nombre<input id="edit-name" required></label><label>Código SAP<input id="edit-sap"></label><label>Código de barras<input id="edit-barcode"></label><label>Tipo<select id="edit-kind"><option value="pendiente">Pendiente</option><option value="consumible">Repuesto consumible</option><option value="herramienta">Herramienta retornable</option></select></label><label>Unidades por paquete<input id="edit-pack" type="number" min="1" step="1"></label><label>Stock mínimo<input id="edit-min" type="number" min="0" step="1"></label><label>Observaciones<textarea id="edit-notes" rows="3"></textarea></label><label class="check"><input type="checkbox" id="edit-active"> Habilitado para movimientos</label><label class="check" id="edit-retire-assets-wrap" hidden><input type="checkbox" id="edit-retire-assets"> Confirmo la baja de las unidades individuales si existen. Se conserva su historial.</label><button class="primary" type="submit">Guardar producto</button></form></div><div><div class="panel"><h2>Ajuste autorizado de existencias</h2><p class="small">El ajuste queda auditado. No modifica automáticamente los paquetes históricos.</p><form id="adjust-form"><label>Producto<select id="adjust-product"></select></label><label>Nuevo stock total en unidades<input id="adjust-stock" type="number" min="0" step="1" required></label><label>Motivo<input id="adjust-reason" required minlength="5" maxlength="255" placeholder="Ej.: Conteo físico del módulo"></label><label class="check"><input type="checkbox" id="adjust-verified"> Confirmo que verifiqué físicamente la cantidad.</label><button type="submit">Registrar ajuste</button></form></div><div class="panel"><h2>Crear colaborador</h2><form id="new-user-form"><label>Nombre<input name="full_name" required></label><label>Código personal<input name="employee_barcode" required></label><label>Contraseña inicial (mínimo 10)<input name="password" type="password" required minlength="10"></label><label>Rol<select name="role"><option value="colaborador">Colaborador</option><option value="encargado">Encargado</option><option value="administrador">Administrador</option></select></label><button type="submit">Crear usuario</button></form></div><div class="panel"><h2>Identificar herramienta individual</h2><form id="new-asset-form"><label>Producto herramienta<select id="asset-product"></select></label><label>Código individual<input id="new-asset-code" required placeholder="Código único de la herramienta"></label><label>Descripción<input id="new-asset-description" maxlength="250"></label><label class="check" id="asset-verified-wrap" hidden><input type="checkbox" id="asset-verified"> Confirmo que verifiqué físicamente esta herramienta individual.</label><button type="submit">Registrar herramienta</button></form></div></div></div></section>
+<section id="admin" class="tab" hidden><div class="heading"><h1>Administración</h1><p>Clasificación, autorización, ajustes y colaboradores.</p></div><div class="two-cols"><div class="panel"><h2>Habilitar y editar producto</h2><form id="edit-product-form"><label>Producto<select id="edit-product"></select></label><label>Nombre<input id="edit-name" required></label><label>Código SAP<input id="edit-sap"></label><label>Código de barras<input id="edit-barcode"></label><label>Tipo<select id="edit-kind"><option value="pendiente">Pendiente</option><option value="consumible">Repuesto consumible</option><option value="herramienta">Herramienta retornable</option></select></label><label>Unidades por paquete<input id="edit-pack" type="number" min="1" step="1"></label><label>Stock mínimo<input id="edit-min" type="number" min="0" step="1"></label><label>Observaciones<textarea id="edit-notes" rows="3"></textarea></label>
+<details><summary>Características y ubicación</summary>
+<label>Marca<input id="edit-brand" maxlength="160"></label><label>Modelo<input id="edit-model" maxlength="255"></label>
+<label>Medida<input id="edit-measure" maxlength="120"></label><label>Capacidad<input id="edit-capacity" maxlength="255"></label>
+<label>Categoría<input id="edit-category" maxlength="140"></label><label>Especificaciones<textarea id="edit-specifications" maxlength="4000"></textarea></label>
+<label>Ubicación<select id="edit-location"><option value="">Ubicación de origen</option></select></label>
+</details><label class="check"><input type="checkbox" id="edit-active"> Habilitado para movimientos</label><label class="check" id="edit-retire-assets-wrap" hidden><input type="checkbox" id="edit-retire-assets"> Confirmo la baja de las unidades individuales si existen. Se conserva su historial.</label><button class="primary" type="submit">Guardar producto</button></form></div><div><div class="panel"><h2>Ajuste autorizado de existencias</h2><p class="small">El ajuste queda auditado. No modifica automáticamente los paquetes históricos.</p><form id="adjust-form"><label>Producto<select id="adjust-product"></select></label><label>Nuevo stock total en unidades<input id="adjust-stock" type="number" min="0" step="1" required></label><label>Motivo<input id="adjust-reason" required minlength="5" maxlength="255" placeholder="Ej.: Conteo físico del módulo"></label><label class="check"><input type="checkbox" id="adjust-verified"> Confirmo que verifiqué físicamente la cantidad.</label><button type="submit">Registrar ajuste</button></form></div><div class="panel"><h2>Crear colaborador</h2><form id="new-user-form"><label>Nombre<input name="full_name" required></label><label>Código personal<input name="employee_barcode" required></label><label>Contraseña inicial (mínimo 10)<input name="password" type="password" required minlength="10"></label><label>Rol<select name="role"><option value="colaborador">Colaborador</option><option value="encargado">Encargado</option><option value="administrador">Administrador</option></select></label><button type="submit">Crear usuario</button></form></div><div class="panel"><h2>Identificar herramienta individual</h2><form id="new-asset-form"><label>Producto herramienta<select id="asset-product"></select></label><label>Códigos individuales<textarea id="new-asset-code" required rows="2" placeholder="Escribe un código único por línea"></textarea></label>
+<label>Ubicación de las unidades<select id="new-asset-location"><option value="">Ubicación del producto</option></select></label><label>Descripción<input id="new-asset-description" maxlength="250"></label><label class="check" id="asset-verified-wrap"><input type="checkbox" id="asset-verified"> Confirmo que verifiqué físicamente esta herramienta individual.</label><button type="submit">Registrar herramienta</button></form></div></div></div></section>
+<section id="catalog-admin" class="admin-only" hidden>
+<div class="two-cols">
+ <div class="panel"><h2>Crear producto</h2>
+ <form id="create-product-form">
+  <label>Módulo<select name="module_id" class="catalog-module" required></select></label>
+  <label>Nombre con medida<input name="name" maxlength="255" required></label>
+  <label>Código de barras<input name="barcode" maxlength="70"></label><label>SAP<input name="sap_code" maxlength="80"></label>
+  <label>Tipo<select name="kind"><option value="pendiente">Pendiente</option><option value="herramienta">Herramienta</option><option value="consumible">Consumible</option></select></label>
+  <button type="submit">Crear producto</button>
+ </form></div>
+ <div class="panel"><h2>Módulos y cajones</h2>
+ <form id="catalog-module-form">
+  <label>Módulo<select name="id" id="catalog-module-editor"></select></label>
+  <label>Código<input name="code" maxlength="20" required></label><label>Nombre<input name="name" maxlength="120" required></label>
+  <label>Estado<select name="inventory_status"><option value="pendiente">Pendiente</option><option value="en_proceso">En proceso</option><option value="cerrado">Cerrado</option></select></label>
+  <button type="submit">Guardar módulo</button>
+ </form></div>
+ <div class="panel"><h2>Ubicaciones</h2>
+ <form id="catalog-location-form">
+  <label>Módulo<select name="module_id" class="catalog-module" required></select></label>
+  <label>Ubicación<select name="id" id="catalog-location-editor"></select></label><label>Nombre<input name="name" maxlength="255" required></label>
+  <button type="submit">Guardar ubicación</button>
+ </form></div>
+ <div class="panel"><h2>Catálogo en Excel</h2>
+ <button id="catalog-template" type="button">Descargar catálogo editable</button>
+ <form id="catalog-import">
+  <label>Archivo XLSX<input id="catalog-file" type="file" accept=".xlsx" required></label>
+  <button type="submit">Vista previa de importación</button>
+  <div id="catalog-preview" aria-live="polite"></div>
+  <button id="catalog-apply" type="button" hidden>Confirmar importación</button>
+ </form></div>
+ <div class="panel"><h2>Permisos de colaboradores</h2>
+ <form id="edit-user-form">
+  <label>Usuario<select name="id" id="edit-user" required></select></label>
+  <label>Rol<select name="role"><option value="colaborador">Colaborador</option><option value="encargado">Encargado</option><option value="administrador">Administrador</option></select></label>
+  <label class="check"><input name="active" type="checkbox"> Cuenta activa</label><button type="submit">Guardar permisos</button>
+ </form></div>
+</div>
+<div class="panel"><h2>Estado de unidades físicas</h2>
+ <form id="batch-tools-form">
+  <label>Unidades<select id="batch-tools" multiple required size="8"></select></label>
+  <label>Nuevo estado<select id="batch-status"><option value="disponible">Disponible</option><option value="mantenimiento">Mantenimiento</option><option value="baja">Baja</option></select></label>
+  <label>Motivo<input id="batch-reason" maxlength="255"></label>
+  <label class="check"><input id="batch-verified" type="checkbox"> Verifiqué físicamente las unidades seleccionadas</label>
+  <button type="submit">Vista previa</button><div id="batch-preview" aria-live="polite"></div>
+  <button id="batch-apply" type="button" hidden>Confirmar estado</button>
+ </form>
+</div>
+<details class="panel" id="audit-panel">
+ <summary>Auditoría administrativa</summary>
+ <div id="audit-list" aria-live="polite"></div>
+ <div class="buttonline pagination"><button type="button" id="audit-latest">Más recientes</button><button type="button" id="audit-older" disabled>Anteriores</button></div>
+</details>
+</section>
 </main><footer>Versión 1.0 de pruebas · MySQL Aiven · No operar productos sin validar</footer></div>
-<div id="camera-modal" class="modal" hidden><div class="modal-content"><div class="buttonline"><b>Escanear código</b><button id="camera-close">Cerrar</button></div><video id="camera-video" autoplay playsinline muted></video><p id="camera-help" class="small">La cámara requiere HTTPS o localhost y permiso del navegador.</p></div></div><div id="toast" role="status" aria-live="polite" hidden></div><script src="/tool-availability.js"></script><script src="/app.js"></script></body></html>
+<div id="camera-modal" class="modal" hidden><div class="modal-content"><div class="buttonline"><b>Escanear código</b><button id="camera-close">Cerrar</button></div><video id="camera-video" autoplay playsinline muted></video><p id="camera-help" class="small">La cámara requiere HTTPS o localhost y permiso del navegador.</p></div></div><div id="toast" role="status" aria-live="polite" hidden></div><script src="/tool-availability.js"></script><script src="/app.js"></script><script src="/catalog-ui.js"></script></body></html>
