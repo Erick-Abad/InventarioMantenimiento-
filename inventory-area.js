@@ -38,11 +38,12 @@ function historyQuery(area) {
           FROM loans l JOIN tool_assets t ON t.id=l.asset_id JOIN products p ON p.id=t.product_id
           WHERE ${scope} AND l.returned_at IS NOT NULL
           UNION ALL
-          SELECT a.id,p.id,a.actor_id,a.created_at,'conteo_fisico',0,
+          SELECT a.id,p.id,a.actor_id,a.created_at,IF(a.action_name='stock_provisional','stock_provisional','conteo_fisico'),
+                 IF(a.action_name='stock_provisional',1,0),
                  CASE WHEN JSON_TYPE(a.details_json->'$.before')='INTEGER' THEN CAST(a.details_json->>'$.before' AS UNSIGNED) END,
                  CAST(a.details_json->>'$.after' AS UNSIGNED),a.details_json->>'$.reason',NULL
           FROM audit_logs a JOIN products p ON p.id=a.entity_id
-          WHERE ${scope} AND a.entity_name='inventory' AND a.action_name='verificar_conteo'`;
+          WHERE ${scope} AND a.entity_name='inventory' AND a.action_name IN ('verificar_conteo','stock_provisional')`;
 }
 
 async function listHistory(pool, area, { userId, moduleId, assetBarcode, location, from, to, limit = 15, offset = 0 } = {}) {
@@ -86,6 +87,7 @@ async function listAreaProducts(pool, area) {
                WHERE entity_name='products' AND action_name='editar_producto' GROUP BY entity_id)
      SELECT p.id,p.name,p.sap_code,p.barcode,p.kind,p.active,p.units_per_pack,p.notes,p.module_id,
             m.name module,m.inventory_status,i.stock_units,i.original_pack_count,i.min_stock_units,i.last_counted_at,
+            (wps.product_id IS NOT NULL) provisional_stock,
             ${productLocation(workshop)} location,
             ${workshop ? "(pl.id IS NOT NULL OR NULLIF(TRIM(s.location_validated),'') IS NOT NULL)" : '1'} location_validated,
             pd.location_id,pd.measure,pd.specifications,
@@ -94,7 +96,7 @@ async function listAreaProducts(pool, area) {
             ${workshop?"COALESCE(pd.capacity,NULLIF(TRIM(s.capacity),''))":"pd.capacity"} capacity,
             ${workshop?"COALESCE(pd.category,NULLIF(TRIM(s.record_type),''))":"pd.category"} category,
             CASE WHEN p.active=0 THEN 'Pendiente de validación'
-                 WHEN p.kind='pendiente' OR ${workshop ? 'i.last_counted_at IS NULL OR i.stock_units IS NULL' : "(p.kind='consumible' AND i.stock_units IS NULL)"} THEN 'Pendiente de conteo o clasificación'
+                 WHEN p.kind='pendiente' OR ${workshop ? '(i.last_counted_at IS NULL AND wps.product_id IS NULL) OR i.stock_units IS NULL' : "(p.kind='consumible' AND i.stock_units IS NULL)"} THEN 'Pendiente de conteo o clasificación'
                  WHEN p.kind='herramienta' AND COALESCE(a.available,0)>0 ${workshop ? 'AND i.stock_units>0' : ''} THEN 'Disponible para préstamo'
                  WHEN p.kind='herramienta' AND COALESCE(a.loaned,0)>0 THEN 'Prestada'
                  WHEN p.kind='herramienta' AND COALESCE(a.assets,0)=0 THEN 'Sin activos registrados'
@@ -104,6 +106,7 @@ async function listAreaProducts(pool, area) {
             GREATEST(COALESCE(i.updated_at,p.created_at),COALESCE(l.created_at,p.created_at),COALESCE(e.edited_at,p.created_at)) updated_at
      FROM products p JOIN modules m ON m.id=p.module_id LEFT JOIN inventory i ON i.product_id=p.id
      ${productDetailJoins(workshop)}
+     LEFT JOIN workshop_provisional_stock wps ON wps.product_id=p.id
      LEFT JOIN latest l ON l.product_id=p.id AND l.rn=1 LEFT JOIN users u ON u.id=l.user_id
      LEFT JOIN assets a ON a.product_id=p.id LEFT JOIN edits e ON e.entity_id=p.id
      WHERE ${scope} ORDER BY p.module_id,p.source_row,p.id`

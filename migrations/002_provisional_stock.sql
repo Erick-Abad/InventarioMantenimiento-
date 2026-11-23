@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS workshop_provisional_stock (
+  product_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (product_id) REFERENCES products(id)
+);

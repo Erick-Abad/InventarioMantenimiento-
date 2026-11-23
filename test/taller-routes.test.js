@@ -65,6 +65,8 @@ test('Taller HTTP workflow requires a physical count and records only verified t
         assets[0].asset_status=sql.includes("'prestada'")?'prestada':args[0];
       } else if (sql.startsWith('INSERT INTO audit_logs')) {
         audit.push({ action:args[1], details:JSON.parse(args[4]) });
+      } else if (sql.startsWith('DELETE FROM workshop_provisional_stock')) {
+        product.provisional_stock=0;
       } else if (!sql.startsWith('INSERT INTO movements')&&!sql.startsWith('UPDATE inventory SET min_stock_units')) {
         assert.fail('Consulta inesperada: '+sql);
       }
@@ -117,6 +119,18 @@ test('Taller HTTP workflow requires a physical count and records only verified t
     assert.equal(assets[0].asset_status,'mantenimiento');
     assert.equal(product.stock_units,1);
     assert.equal(audit.at(-1).action,'devolucion');
+    const provisional={...loan,request_id:randomUUID()};
+    product.last_counted_at=null;
+    assets[0].asset_status='disponible';
+    await call('/loans',provisional,409);
+    product.provisional_stock=1;
+    const secondLoan=await call('/loans',provisional,200);
+    assert.equal(product.last_counted_at,null);
+    await call('/loans/'+secondLoan.id+'/return',{area:'taller',maintenance:true},200);
+    await call('/admin/adjust',{...adjust,new_stock_units:1},400);
+    await call('/admin/adjust',{...adjust,new_stock_units:1,physical_verification:true},200);
+    assert.ok(product.last_counted_at);
+    assert.equal(product.provisional_stock,0);
     assert.ok(lockedReads>=12);
     const adminToken=token;
     const workerToken=(await call('/login',{user_id:5,password},200)).token;
@@ -132,7 +146,7 @@ test('Taller HTTP workflow requires a physical count and records only verified t
     assets[0].asset_status='disponible';
     await call('/loans',{...selfLoan,employee_barcode:'EMP-4'},403);
     const borrowed=await call('/loans',selfLoan,200);
-    assert.equal(loans[1].loaned_by,5);
+    assert.equal(loans.find(row=>row.id===borrowed.id).loaned_by,5);
     await call('/loans/return-by-code',{area:'taller',asset_barcode:'TALLER-IND-001',employee_barcode:'EMP-5'},200);
     assert.ok(loans.find(row=>row.id===borrowed.id).returned_at);
     token=adminToken;

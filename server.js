@@ -26,7 +26,7 @@ const uid=()=>crypto.randomUUID();
 const UUID_PATTERN=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 app.get('/api/health',safe(async(req,res)=>{
  await getMode(pool);
- await pool.query('SELECT 1 FROM app_sessions s,product_details p,inventory_locations l,tool_locations t LIMIT 0');
+ await pool.query('SELECT 1 FROM app_sessions s,product_details p,inventory_locations l,tool_locations t,workshop_provisional_stock w LIMIT 0');
  res.json({ok:true,database:'connected'});
 }));
 app.get('/api/login/users',rateLimit({windowMs:15*60*1000,limit:60,standardHeaders:'draft-7',legacyHeaders:false}),safe(async(req,res)=>{
@@ -91,13 +91,14 @@ app.get('/api/dashboard',auth,safe(async(req,res)=>{
   }
   const [[toolCounts]]=await pool.query(`SELECT
    COUNT(CASE WHEN t.asset_status='disponible' AND p.active=1 AND p.kind='herramienta'
-        AND (${area==='taller'?'i.last_counted_at IS NOT NULL AND i.stock_units>0':'1=1'})
+        AND (${area==='taller'?'(i.last_counted_at IS NOT NULL OR wps.product_id IS NOT NULL) AND i.stock_units>0':'1=1'})
         AND l.id IS NULL THEN 1 END) available,
    COUNT(l.id) loaned,COUNT(*) physical,
    COUNT(CASE WHEN t.asset_status='mantenimiento' THEN 1 END) maintenance,
    COUNT(CASE WHEN t.asset_status='baja' THEN 1 END) retired,
    COUNT(CASE WHEN l.due_at<NOW() THEN 1 END) overdue FROM tool_assets t JOIN products p ON p.id=t.product_id
-   LEFT JOIN inventory i ON i.product_id=p.id LEFT JOIN loans l ON l.open_asset_id=t.id WHERE ${areaCondition(area)}`);
+   LEFT JOIN inventory i ON i.product_id=p.id LEFT JOIN workshop_provisional_stock wps ON wps.product_id=p.id
+   LEFT JOIN loans l ON l.open_asset_id=t.id WHERE ${areaCondition(area)}`);
   const counted=products.filter(p=>p.stock_units!==null);
   const summary={products:products.length,units:counted.length?counted.reduce((sum,p)=>sum+Number(p.stock_units),0):null,
    uncounted:products.length-counted.length,
@@ -200,18 +201,19 @@ app.patch('/api/admin/products/:id',auth,admin,safe(async(req,res)=>{
  const c=await pool.getConnection();
  try{
   await c.beginTransaction();
-  const [[product]]=await c.query(`SELECT p.module_id,p.barcode,p.active,p.kind,i.stock_units,i.last_counted_at
-   FROM products p LEFT JOIN inventory i ON i.product_id=p.id WHERE p.id=? FOR UPDATE`,[id]);
+  const [[product]]=await c.query(`SELECT p.module_id,p.barcode,p.active,p.kind,i.stock_units,i.last_counted_at,(wps.product_id IS NOT NULL) provisional_stock
+   FROM products p LEFT JOIN inventory i ON i.product_id=p.id LEFT JOIN workshop_provisional_stock wps ON wps.product_id=p.id WHERE p.id=? FOR UPDATE`,[id]);
   if(!product)throw invalid('Producto inexistente.',404);
   requireArea(product.module_id,req.body.area);
   const code=String(barcode||'').trim()||null;
   let retiredAssets=[];
   if(active&&kind==='pendiente'&&(!product.active||product.kind!==kind))throw invalid('Clasifica el producto antes de habilitarlo.');
   if(product.barcode&&code!==product.barcode)throw invalid('Conserva los códigos existentes.');
-  if(active&&!product.active&&(product.stock_units==null||!product.last_counted_at))throw invalid('Registra y confirma el conteo físico antes de activar el producto.');
+  const provisionalTool=kind==='herramienta'&&product.provisional_stock;
+  if(active&&!product.active&&(product.stock_units==null||!product.last_counted_at&&!provisionalTool))throw invalid('Registra y confirma el conteo físico antes de activar el producto.');
   if(product.module_id===TALLER_ID){
    if(code!==product.barcode)throw invalid('El código CTH está vinculado a la carga del Taller y debe conservarse.');
-   if(active&&kind!=='pendiente'&&(product.stock_units==null||!product.last_counted_at))throw invalid('Registra y confirma el conteo físico antes de activar el producto.');
+   if(active&&kind!=='pendiente'&&(product.stock_units==null||!product.last_counted_at&&!provisionalTool))throw invalid('Registra y confirma el conteo físico antes de activar el producto.');
    if(product.kind==='herramienta'&&kind!==product.kind){
     const [assets]=await c.query(`SELECT t.id,t.asset_status,l.id open_loan_id FROM tool_assets t
      LEFT JOIN loans l ON l.open_asset_id=t.id WHERE t.product_id=? AND (t.asset_status<>'baja' OR l.id IS NOT NULL) FOR UPDATE`,[id]);
@@ -274,6 +276,7 @@ app.post('/api/admin/adjust',auth,admin,safe(async(req,res)=>{
    const type=before===null||n>before?'ajuste_positivo':'ajuste_negativo';
    await c.query('INSERT INTO movements(product_id,user_id,authorized_by,movement_type,quantity_units,stock_before,stock_after,reason,request_id) VALUES(?,?,?,?,?,?,?,?,?)',[id,req.user.id,req.user.id,type,change,before,n,reason,uid()]);
   }
+  if(verified&&p.module_id===TALLER_ID)await c.query('DELETE FROM workshop_provisional_stock WHERE product_id=?',[id]);
   await audit(c,req.user.id,change?'ajuste_stock':'verificar_conteo','inventory',id,{before,after:n,reason,physical_verification:verified});
   await c.commit();
   res.json({ok:true,before,after:n});
@@ -345,14 +348,15 @@ app.post('/api/loans',auth,safe(async(req,res)=>{
  if((!assetId&&!code)||code.length>70||!UUID_PATTERN.test(requestId)||due&&(!Number.isFinite(+due)||due<=new Date()))return bad(res,'Código, solicitud o vencimiento inválido.');
  const id=await transaction(pool,async c=>{
   await requireOperator(c,req.user,req.body.employee_barcode);
-  const [[tool]]=await c.query(`SELECT ta.id,ta.asset_status,p.module_id,p.active,p.kind,i.stock_units,i.last_counted_at
+  const [[tool]]=await c.query(`SELECT ta.id,ta.asset_status,p.module_id,p.active,p.kind,i.stock_units,i.last_counted_at,(wps.product_id IS NOT NULL) provisional_stock
    FROM tool_assets ta JOIN products p ON p.id=ta.product_id LEFT JOIN inventory i ON i.product_id=p.id
+   LEFT JOIN workshop_provisional_stock wps ON wps.product_id=p.id
    WHERE ${assetId?'ta.id':'ta.asset_barcode'}=? FOR UPDATE`,[assetId||code]);
   if(!tool)throw invalid('Herramienta no encontrada.',404);
   requireArea(tool.module_id,req.body.area);
   const blockReason=loanBlockReason(tool);
   if(blockReason)throw invalid(blockReason,409);
-  if(tool.module_id===TALLER_ID&&(!tool.last_counted_at||!tool.stock_units))throw invalid('La herramienta requiere conteo físico.',409);
+  if(tool.module_id===TALLER_ID&&(!tool.stock_units||!tool.last_counted_at&&!tool.provisional_stock))throw invalid('La herramienta requiere conteo físico.',409);
   const [[open]]=await c.query('SELECT id FROM loans WHERE open_asset_id=? FOR UPDATE',[tool.id]);
   if(open)throw invalid('La herramienta ya tiene un préstamo abierto.',409);
   const [[prior]]=await c.query('SELECT id FROM loans WHERE asset_id=? AND (notes=? OR notes LIKE ?)',[tool.id,'Solicitud '+requestId,'Solicitud '+requestId+' · %']);
@@ -407,7 +411,7 @@ app.get('/api/export',auth,admin,safe(async(req,res)=>{const wb=new ExcelJS.Work
   sheet('Inventario',[['Ubicación','location',32],['Artículo','name',48],['SAP','sap_code',16],['Código de barras','barcode',19],
    ['Tipo','kind',16],['Activo','active',12],['Cantidad','stock_units',14],['Disponible','availability',32],
    ['Último responsable','last_worker',28],['Actualización','updated_at',24],['Mínimo','min_stock_units',13],
-   ['Marca','brand',21],['Modelo','model',24],['Medida','measure',17],['Capacidad','capacity',20],['Categoría','category',25],['Especificaciones','specifications',40]],products);
+   ['Marca','brand',21],['Modelo','model',24],['Medida','measure',17],['Capacidad','capacity',20],['Categoría','category',25],['Especificaciones','specifications',40],['Conteo provisional','provisional_stock',20]],products.map(p=>({...p,provisional_stock:p.provisional_stock?'Sí':''})));
   sheet('Movimientos',[['Fecha','created_at',24],['Tipo','movement_type',20],['Artículo','product',48],['Código de barras','barcode',19],
    ['Activo individual','asset_barcode',20],['Ubicación','location',32],['Trabajador','collaborator',28],['Cantidad','quantity_units',14],
    ['Antes','stock_before',14],['Después','stock_after',14],['Observaciones','reason',40]],moves);

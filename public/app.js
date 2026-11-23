@@ -6,7 +6,7 @@ const areaNames={valvulas:'Cuarto de Válvulas',taller:'Taller - Bodega de Herra
 const areaEndpoint=(endpoint,params={})=>endpoint+'?'+new URLSearchParams({area,...params});
 const dateLabel=value=>value?new Date(value).toLocaleString('es-CO'):'—';
 const countedUnits=value=>value===null?'Sin conteo':Number(value).toLocaleString('es-CO');
-const operationLabels={entrada:'Entrada',consumo:'Retiro',ajuste_positivo:'Ajuste positivo',ajuste_negativo:'Ajuste negativo',conteo_fisico:'Conteo físico',prestamo:'Préstamo',devolucion:'Devolución'};
+const operationLabels={entrada:'Entrada',consumo:'Retiro',ajuste_positivo:'Ajuste positivo',ajuste_negativo:'Ajuste negativo',conteo_fisico:'Conteo físico',stock_provisional:'Habilitación provisional',prestamo:'Préstamo',devolucion:'Devolución'};
 const scopedPost=(endpoint,data,method)=>post(endpoint,{...data,area},method);
 const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 function notice(s){const t=$('toast');t.textContent=s;t.hidden=false;setTimeout(()=>t.hidden=true,4800)}
@@ -221,7 +221,7 @@ function filterProducts(reset=false){
   const start=(inventoryPage-1)*size;
   const visible=matches.slice(start,start+size),adminView=isAdmin();
   $('product-list').innerHTML=table([...(adminView?['Acción']:[]),'Código de barras','Artículo','SAP','Cantidad','Ubicación','Tipo','Estado','Disponibilidad','Último responsable','Actualización'],
-    visible.map(p=>[...(adminView?['']:[]),p.barcode||'—',p.name,p.sap_code||'—',p.stock_units??'Sin conteo',
+    visible.map(p=>[...(adminView?['']:[]),p.barcode||'—',p.name,p.sap_code||'—',stockLabel(p),
       p.location_validated?p.location:p.location+' (según registro)',p.kind,p.active?'Activo':'Por validar',p.availability,p.last_worker||'—',dateLabel(p.updated_at)]));
   if(adminView)visible.forEach((product,index)=>{
     const button=document.createElement('button');
@@ -232,6 +232,10 @@ function filterProducts(reset=false){
   $('inventory-page').textContent=`Página ${inventoryPage} de ${pages} · ${matches.length} referencias`;
   $('inventory-prev').disabled=inventoryPage===1;
   $('inventory-next').disabled=inventoryPage===pages;
+}
+function stockLabel(product){
+  if(product.stock_units===null)return 'Sin conteo';
+  return product.provisional_stock?product.stock_units+' provisional':product.stock_units;
 }
 function updateEdit(){
   const p=products.find(x=>String(x.id)===$('edit-product').value);
@@ -263,7 +267,7 @@ function showProduct(p){
   const box=$('selected-product-details');
   $('movement-form').querySelector('button[type=submit]').disabled=movementPending||!movementAllowed(p);
   if(!p){box.hidden=true;box.innerHTML='';return}
-  const stock=p.stock_units===null?'Sin conteo':`${Number(p.stock_units).toLocaleString('es-CO')} unidades`;
+  const stock=p.provisional_stock?stockLabel(p):p.stock_units===null?'Sin conteo':`${Number(p.stock_units).toLocaleString('es-CO')} unidades`;
   const status=p.kind==='pendiente'?'Pendiente de clasificación':p.active?'Activo':'Inactivo';
   const fields=[['Ubicación',p.location||p.module],['Código de barras',p.barcode||'—'],['SAP',p.sap_code||'—'],
     ['Existencias',stock],['Tipo',p.kind],['Estado',status],['Disponibilidad',p.availability||'—'],
@@ -291,10 +295,10 @@ function assetAvailability(asset){
     const labels={prestada:'Prestada',mantenimiento:'Mantenimiento',baja:'Dada de baja'};
     return{available:false,label:asset.kind==='herramienta'?labels[asset.asset_status]||'No disponible':'Clasificación incorrecta',reason};
   }
-  if(area==='taller'&&(!asset.last_counted_at||!Number(asset.stock_units))){
+  if(area==='taller'&&(!Number(asset.stock_units)||!asset.last_counted_at&&!asset.provisional_stock)){
     return{available:false,label:'Pendiente de conteo',reason:'La referencia requiere un conteo físico con existencias.'};
   }
-  return{available:true,label:'Disponible',reason:'Lista para préstamo.'};
+  return{available:true,label:'Disponible',reason:asset.provisional_stock?'Disponible con conteo provisional.':'Lista para préstamo.'};
 }
 function referenceStatus(reference){
   if(reference.kind==='pendiente')return 'Pendiente de clasificación';
@@ -360,11 +364,11 @@ function showToolReference(reference){
   box.innerHTML=`<strong>${escapeHtml(reference.name)}</strong><dl>
     <div><dt>Ubicación</dt><dd>${escapeHtml(reference.location)}</dd></div>
     <div><dt>Código de producto</dt><dd>${escapeHtml(reference.product_barcode)}</dd></div>
-    <div><dt>Cantidad</dt><dd>${escapeHtml(reference.stock_units??'Sin conteo')}</dd></div>
+    <div><dt>Cantidad</dt><dd>${escapeHtml(stockLabel(reference))}</dd></div>
     <div><dt>Estado</dt><dd>${referenceStatus(reference)}</dd></div>
     </dl><p class="small">El préstamo requiere una unidad física validada con código individual.</p>`;
 }
-function showAssetDetails(a){const box=$('asset-details');if(!a){box.hidden=true;box.innerHTML='';return}const availability=assetAvailability(a),storedStatus=a.asset_status==='mantenimiento'&&!Number(a.active)?'Mantenimiento (estado temporal registrado)':a.asset_status;const assetActions=`<div class="buttonline"><button type="button" data-asset-history="${a.id}">Historial individual</button>${isAdmin()?`<button type="button" data-asset-label="${a.id}">Imprimir etiqueta</button>`:''}</div><div id="asset-history-result"></div>${isAdmin()?assetEditor(a):''}`;const validationForm=me?.role==='administrador'&&(!Number(a.active)||a.asset_status==='mantenimiento')&&!['baja','prestada'].includes(a.asset_status)?`<form id="validate-asset-form" data-asset-id="${a.id}"><label class="check"><input type="checkbox" name="physical_verification" required> Confirmo que verifiqué físicamente el conjunto y su ubicación.</label><label>Motivo / observación de validación<textarea name="reason" rows="2" required minlength="5" placeholder="Indica qué se verificó"></textarea></label><button class="primary" type="submit">Validar y habilitar esta herramienta</button></form>`:'';box.hidden=false;box.innerHTML=`<strong>${escapeHtml(a.name)}</strong><dl><div><dt>Ubicación</dt><dd>${escapeHtml(a.location||a.module)}</dd></div><div><dt>Código de herramienta/conjunto</dt><dd>${escapeHtml(a.asset_barcode)}</dd></div><div><dt>Código de barras del producto</dt><dd>${escapeHtml(a.product_barcode||'—')}</dd></div><div><dt>Código SAP</dt><dd>${escapeHtml(a.sap_code||'—')}</dd></div><div><dt>Estado registrado</dt><dd>${escapeHtml(storedStatus)}</dd></div><div><dt>Disponibilidad</dt><dd>${escapeHtml(availability.label)}</dd></div>${a.borrower?`<div><dt>En poder de</dt><dd>${escapeHtml(a.borrower)}</dd></div><div><dt>Fecha de préstamo</dt><dd>${escapeHtml(dateLabel(a.loaned_at))}</dd></div>`:''}</dl><p class="small">${escapeHtml(availability.reason)}</p>${a.description?`<p class="small">Descripción: ${escapeHtml(a.description)}</p>`:''}${validationForm}${assetActions}`}
+function showAssetDetails(a){const box=$('asset-details');if(!a){box.hidden=true;box.innerHTML='';return}const availability=assetAvailability(a),storedStatus=a.asset_status==='mantenimiento'&&!Number(a.active)?'Mantenimiento (estado temporal registrado)':a.asset_status;const assetActions=`<div class="buttonline"><button type="button" data-asset-history="${a.id}">Historial individual</button>${isAdmin()?`<button type="button" data-asset-label="${a.id}">Imprimir etiqueta</button>`:''}</div><div id="asset-history-result"></div>${isAdmin()?assetEditor(a):''}`;const validationForm=me?.role==='administrador'&&(!Number(a.active)||a.asset_status==='mantenimiento')&&!['baja','prestada'].includes(a.asset_status)?`<form id="validate-asset-form" data-asset-id="${a.id}"><label class="check"><input type="checkbox" name="physical_verification" required> Confirmo que verifiqué físicamente el conjunto y su ubicación.</label><label>Motivo / observación de validación<textarea name="reason" rows="2" required minlength="5" placeholder="Indica qué se verificó"></textarea></label><button class="primary" type="submit">Validar y habilitar esta herramienta</button></form>`:'';box.hidden=false;box.innerHTML=`<strong>${escapeHtml(a.name)}</strong><dl><div><dt>Ubicación</dt><dd>${escapeHtml(a.location||a.module)}</dd></div><div><dt>Código de herramienta/conjunto</dt><dd>${escapeHtml(a.asset_barcode)}</dd></div><div><dt>Código de barras del producto</dt><dd>${escapeHtml(a.product_barcode||'—')}</dd></div><div><dt>Código SAP</dt><dd>${escapeHtml(a.sap_code||'—')}</dd></div><div><dt>Estado registrado</dt><dd>${escapeHtml(storedStatus)}</dd></div><div><dt>Disponibilidad</dt><dd>${escapeHtml(availability.label)}</dd></div><div><dt>Cantidad</dt><dd>${escapeHtml(stockLabel(a))}</dd></div>${a.borrower?`<div><dt>En poder de</dt><dd>${escapeHtml(a.borrower)}</dd></div><div><dt>Fecha de préstamo</dt><dd>${escapeHtml(dateLabel(a.loaned_at))}</dd></div>`:''}</dl><p class="small">${escapeHtml(availability.reason)}</p>${a.description?`<p class="small">Descripción: ${escapeHtml(a.description)}</p>`:''}${validationForm}${assetActions}`}
 function canReturn(loan){
   return !!loan&&!loan.returned_at&&canOperateTools()&&(isAdmin()||Number(me.id)===Number(loan.borrower_id));
 }

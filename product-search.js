@@ -15,10 +15,12 @@ async function searchProducts(pool, query, area) {
   const pattern = '%'+escapeLike(term)+'%';
   const [rows] = await pool.query(
     `SELECT p.id,p.name,p.sap_code,p.barcode,p.kind,p.active,p.units_per_pack,p.notes,p.module_id,
-            m.name module,m.inventory_status,i.stock_units,i.original_pack_count,i.min_stock_units,i.last_counted_at
+            m.name module,m.inventory_status,i.stock_units,i.original_pack_count,i.min_stock_units,i.last_counted_at,
+            (wps.product_id IS NOT NULL) provisional_stock
      FROM products p
      JOIN modules m ON m.id=p.module_id
      LEFT JOIN inventory i ON i.product_id=p.id
+     LEFT JOIN workshop_provisional_stock wps ON wps.product_id=p.id
      WHERE ${scope} AND (${exact ? 'p.barcode=?' : "p.barcode=? OR p.sap_code=? OR p.name LIKE ? ESCAPE '!' OR p.barcode LIKE ? ESCAPE '!' OR p.sap_code LIKE ? ESCAPE '!'"})
      ORDER BY ${exact ? '' : 'CASE WHEN p.barcode=? THEN 0 WHEN p.sap_code=? THEN 1 ELSE 2 END,'}p.module_id,p.source_row
      LIMIT ${SEARCH_LIMIT}`,

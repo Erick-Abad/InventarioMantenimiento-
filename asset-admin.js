@@ -15,15 +15,16 @@ function changeAssets(pool,userId,input) {
   }
   return transaction(pool,async db=>{
     const [assets]=await db.query(`SELECT t.id,t.asset_barcode,t.asset_status,p.id product_id,p.module_id,p.name,p.kind,p.active,
-      i.last_counted_at,i.stock_units,l.id open_loan_id FROM tool_assets t
+      i.last_counted_at,i.stock_units,(wps.product_id IS NOT NULL) provisional_stock,l.id open_loan_id FROM tool_assets t
       JOIN products p ON p.id=t.product_id LEFT JOIN inventory i ON i.product_id=p.id
+      LEFT JOIN workshop_provisional_stock wps ON wps.product_id=p.id
       LEFT JOIN loans l ON l.open_asset_id=t.id WHERE t.id IN (?) ORDER BY t.id FOR UPDATE`,[ids]);
     if(assets.length!==ids.length)throw invalid('Una o más unidades no existen.',404);
     const rows=assets.map(asset=>{
       requireArea(asset.module_id,input.area);
       const reason=asset.open_loan_id||asset.asset_status==='prestada'?'Tiene un préstamo abierto'
         :state==='disponible'&&asset.kind!=='herramienta'?'La referencia no está clasificada como herramienta'
-        :state==='disponible'&&asset.module_id===TALLER_ID&&(!asset.last_counted_at||!asset.stock_units)?'Falta un conteo físico con existencias'
+        :state==='disponible'&&asset.module_id===TALLER_ID&&(!asset.stock_units||!asset.last_counted_at&&!asset.provisional_stock)?'Falta un conteo físico con existencias'
         :state==='disponible'&&asset.asset_status==='baja'?'La unidad está dada de baja'
         :null;
       return {id:asset.id,barcode:asset.asset_barcode,name:asset.name,current:asset.asset_status,reason};
