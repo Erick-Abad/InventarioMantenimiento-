@@ -5,8 +5,13 @@
   <button type="button" data-area="valvulas" aria-pressed="true">Cuarto de Válvulas</button>
   <button type="button" data-area="taller" aria-pressed="false">Inventario de Taller</button>
 </div>
-<nav id="nav"><button class="selected" data-tab="dashboard">Dashboard</button><button data-tab="inventario">Inventario</button><button data-tab="movimientos" class="admin-only">Escanear / mover</button><button data-tab="prestamos">Préstamos</button><button data-tab="admin" class="admin-only">Administración</button></nav><main>
+<nav id="nav"><button class="selected" data-tab="dashboard" class="admin-only">Dashboard</button><button data-tab="inventario">Inventario</button><button data-tab="movimientos">Entradas y retiros</button><button data-tab="prestamos">Préstamos</button><button data-tab="admin" class="admin-only">Administración</button></nav><main>
 <div class="toolbar" id="workshop-mode-bar"><strong id="workshop-mode-label" aria-live="polite">Consultando modo del Taller…</strong><button type="button" id="workshop-mode-toggle" class="admin-only" disabled>Cambiar modo</button></div>
+<details id="entry-alert-panel" class="panel admin-only" hidden>
+  <summary id="entry-alert-summary" aria-live="polite">Entradas de colaboradores</summary>
+  <div id="entry-alert-list"></div>
+  <button id="entry-alert-read" type="button" hidden>Marcar alertas visibles como leídas</button>
+</details>
 <div id="worker-panel" class="panel worker-panel" hidden>
   <form id="worker-form">
     <label for="worker-code">Confirma tu credencial para operar en el Taller</label>

@@ -4,7 +4,7 @@ const { registerAdminMovement } = require('../admin-movement');
 
 const requestId = 'c0a80123-4567-489a-8abc-0123456789ab';
 
-function createPool({ kind = 'consumible', stock = 150, duplicateRequest = false, active = 1, moduleId = 1, counted = true } = {}) {
+function createPool({ kind = 'consumible', stock = 150, duplicateRequest = false, active = 1, moduleId = 1, counted = true, alertFails = false } = {}) {
   const state = { stock, events: [], inserts: [], committed: false, released: false };
   let stockAtTransactionStart = stock;
   const connection = {
@@ -17,8 +17,12 @@ function createPool({ kind = 'consumible', stock = 150, duplicateRequest = false
       if (sql.startsWith('INSERT INTO movements')) {
         if (duplicateRequest) throw Object.assign(new Error('Duplicate request'), { code: 'ER_DUP_ENTRY' });
         state.inserts.push({ table: 'movements', params });
+        return [{ insertId:25 }];
       }
-      if (sql.startsWith('INSERT INTO audit_logs')) state.inserts.push({ table: 'audit_logs', params });
+      if (sql.startsWith('INSERT INTO audit_logs')) {
+        if (alertFails && params[1]==='entrada_colaborador') throw Error('No se pudo guardar la alerta');
+        state.inserts.push({ table: 'audit_logs', params });
+      }
       return [{ affectedRows: 1 }];
     },
     async commit() { state.committed = true; state.events.push('commit'); },
@@ -36,6 +40,26 @@ const movement = overrides => ({
   reason: 'Conteo y reposición confirmados',
   requestId,
   ...overrides
+});
+
+test('a collaborator entry stores one linked alert in the stock transaction', async () => {
+  const {pool,state}=createPool({stock:3});
+  const user={id:4,role:'colaborador'};
+  const data=movement({user,adminMovement:false,quantity:2,reason:''});
+  assert.deepEqual(await registerAdminMovement(pool,data),{before:3,after:5});
+  const [saved,alert]=state.inserts;
+  assert.equal(saved.params[2],null);
+  assert.deepEqual(alert.params.slice(0,4),[4,'entrada_colaborador','movements',25]);
+  assert.deepEqual(JSON.parse(alert.params[4]),{product_id:12,quantity:2,after:5});
+
+  const consume=createPool({stock:5});
+  await registerAdminMovement(consume.pool,{...data,type:'consumo'});
+  assert.equal(consume.state.inserts.length,1);
+
+  const failed=createPool({stock:3,alertFails:true});
+  await assert.rejects(()=>registerAdminMovement(failed.pool,data),/guardar la alerta/);
+  assert.equal(failed.state.stock,3);
+  assert.equal(failed.state.committed,false);
 });
 
 test('admin can record a justified entry for an inactive product without activating it', async () => {

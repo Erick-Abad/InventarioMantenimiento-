@@ -1,5 +1,6 @@
 const $=id=>document.getElementById(id);let token=sessionStorage.getItem('invtoken')||'',me=JSON.parse(sessionStorage.getItem('invme')||'null'),products=[],assets=[],loans=[],selectedAssetId=null,stream=null,cameraControls=null,scanTimer=null,searchTimer=null,searchSequence=0,zxingLoadPromise=null,loginMethod='select',loginCodeTimer=null,loginIdentifySequence=0,identifiedScanCode='';
 let area='valvulas',activeTab='dashboard',inventoryPage=1,toolPage=1,toolReferences=[],historyPage=1,historySequence=0,returnLoan=null;
+let toastTimer,alertTimer,visibleAlerts=[],previousUnread=0,newestAlert=0,alertRequest=0;
 let pickedTool=null,workshopMode=null,idleSeconds=900,idleTimer,lastActivity=0,lastRefresh=0;
 let areaRevision=0,cameraRevision=0,movementPending=false,loanPending=false;
 const areaNames={valvulas:'Cuarto de Válvulas',taller:'Taller - Bodega de Herramientas'};
@@ -9,8 +10,8 @@ const countedUnits=value=>value===null?'Sin conteo':Number(value).toLocaleString
 const operationLabels={entrada:'Entrada',consumo:'Retiro',ajuste_positivo:'Ajuste positivo',ajuste_negativo:'Ajuste negativo',conteo_fisico:'Conteo físico',stock_provisional:'Habilitación provisional',prestamo:'Préstamo',devolucion:'Devolución'};
 const scopedPost=(endpoint,data,method)=>post(endpoint,{...data,area},method);
 const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-function notice(s){const t=$('toast');t.textContent=s;t.hidden=false;setTimeout(()=>t.hidden=true,4800)}
-async function api(endpoint,options={}){const headers={...(options.headers||{}),Authorization:'Bearer '+token};if(options.body)headers['Content-Type']='application/json';const r=await fetch('/api'+endpoint,{...options,headers});if(r.status===401){logout(false);throw Error('Tu sesión venció')}if(!r.ok){const data=await r.json().catch(()=>({}));throw Error(data.error||'No se pudo completar la solicitud')}return /spreadsheetml|image\/svg/.test(r.headers.get('content-type')||'')?r.blob():r.json()}
+function notice(s){const t=$('toast');t.textContent=s;t.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.hidden=true,4800)}
+async function api(endpoint,options={}){const currentToken=token;const headers={...(options.headers||{}),Authorization:'Bearer '+currentToken};if(options.body)headers['Content-Type']='application/json';const r=await fetch('/api'+endpoint,{...options,headers});if(r.status===401){if(token===currentToken)logout(false);throw Error('Tu sesión venció')}if(!r.ok){const data=await r.json().catch(()=>({}));throw Error(data.error||'No se pudo completar la solicitud')}return /spreadsheetml|image\/svg/.test(r.headers.get('content-type')||'')?r.blob():r.json()}
 const post=(url,data,method='POST')=>api(url,{method,body:JSON.stringify(data)});
 async function loadLoginUsers(){const response=await fetch('/api/login/users');const users=await response.json().catch(()=>[]);if(!response.ok)throw Error(users.error||'No se pudo cargar la lista de usuarios');$('login-user').innerHTML='<option value="">Selecciona tu nombre</option>'+users.map(user=>`<option value="${user.id}">${escapeHtml(user.full_name)}</option>`).join('')}
 function setLoginMethod(method){loginMethod=method;const methods=['select','manual','scan'];for(const current of methods){$(`login-${current}-panel`).hidden=current!==method;const button=document.querySelector(`[data-login-method="${current}"]`);button.classList.toggle('selected',current===method);button.setAttribute('aria-selected',String(current===method))}$('login-user').required=method==='select';$('login-manual-code').required=method==='manual';$('login-scan-code').required=method==='scan';if(method!=='scan'){identifiedScanCode='';$('login-identify-message').textContent='El escaneo identifica tu usuario, pero no inicia sesión.';$('login-identify-message').className='login-feedback'}}
@@ -22,6 +23,8 @@ function logout(reason='salida'){
   for(const id of ['login-manual-code','login-scan-code','worker-code','loan-notes'])$(id).value='';
   for(const id of ['asset-details','tools-list','loans-list','recent','product-list'])$(id).replaceChildren();
   assets=[];loans=[];products=[];toolReferences=[];pickedTool=null;selectedAssetId=null;
+  clearInterval(alertTimer);visibleAlerts=[];previousUnread=0;newestAlert=0;
+  $('entry-alert-panel').open=false;$('entry-alert-list').replaceChildren();$('entry-alert-read').hidden=true;
   if(typeof clearCatalogSession==='function')clearCatalogSession();
   loadLoginUsers().catch(e=>notice(e.message));
   if(reason&&previous)fetch('/api/logout',{method:'POST',headers:{Authorization:'Bearer '+previous,'Content-Type':'application/json'},body:JSON.stringify({reason}),keepalive:true}).catch(()=>{});
@@ -44,12 +47,18 @@ function showApp(){
   $('login').hidden=true;$('app').hidden=false;
   $('identity').textContent=me.name+' · '+me.role;
   document.querySelectorAll('.admin-only').forEach(item=>item.hidden=!isAdmin);
-  $('movement-reason').required=true;
+  $('movement-reason').required=isAdmin;
+  $('movement-reason').minLength=isAdmin?5:0;
   $('history-worker').hidden=!isAdmin;
   lastActivity=lastRefresh=Date.now();
   activity();
   selectArea('valvulas',isAdmin?'dashboard':'prestamos');
   refreshMode().catch(e=>notice(e.message));
+  if(isAdmin){
+    clearInterval(alertTimer);
+    refreshEntryAlerts();
+    alertTimer=setInterval(refreshEntryAlerts,30000);
+  }
 }
 for(const event of ['pointerdown','keydown','touchstart'])document.addEventListener(event,()=>activity(true),{passive:true});
 const isAdmin=()=>me?.role==='administrador';
@@ -121,7 +130,7 @@ function selectArea(next,tab=activeTab==='prestamos'?'prestamos':'inventario'){
   switchTab(tab);
 }
 function switchTab(tab){
-  if(!isAdmin()&&['admin','movimientos'].includes(tab))return;
+  if(!isAdmin()&&['admin','dashboard'].includes(tab))return;
   activeTab=tab;
   $('catalog-admin').hidden=tab!=='admin';
   document.querySelectorAll('.tab').forEach(e=>e.hidden=e.id!==tab);
@@ -138,7 +147,7 @@ function switchTab(tab){
   }
 }
 function updateWorkerPanel(){
-  const needsWorker=isAdmin()&&area==='taller'&&['movimientos','admin'].includes(activeTab);
+  const needsWorker=area==='taller'&&(activeTab==='movimientos'||isAdmin()&&activeTab==='admin');
   $('worker-panel').hidden=!needsWorker;
   $('worker-form').hidden=Boolean(me?.credentialVerified);
   $('worker-feedback').textContent=me?.credentialVerified?`Credencial verificada · ${me.name}`:'';
@@ -206,13 +215,42 @@ function setFilterOptions(id,options,placeholder){
   if([...dropdown.options].some(option=>option.value===previous))dropdown.value=previous;
 }
 function table(headers,rows){return '<div class="table-wrap"><table><thead><tr>'+headers.map(h=>'<th>'+escapeHtml(h)+'</th>').join('')+'</tr></thead><tbody>'+ (rows.length?rows.map(row=>'<tr>'+row.map(c=>'<td>'+escapeHtml(c)+'</td>').join('')+'</tr>').join(''):'<tr><td colspan="'+headers.length+'">No hay datos registrados</td></tr>')+'</tbody></table></div>'}
+async function refreshEntryAlerts(announce=true){
+  if(!isAdmin())return;
+  const currentToken=token;
+  const sequence=++alertRequest;
+  try{
+    const {alerts,unread}=await api('/admin/entry-alerts');
+    if(token!==currentToken||sequence!==alertRequest)return;
+    visibleAlerts=alerts.map(alert=>Number(alert.id));
+    const latest=visibleAlerts[0]||0;
+    if(announce&&unread&&(latest>newestAlert||unread>previousUnread))notice(`${unread} entradas de colaboradores por revisar.`);
+    newestAlert=Math.max(newestAlert,latest);
+    previousUnread=unread;
+    $('entry-alert-summary').textContent=`Entradas de colaboradores · ${unread} sin leer`;
+    $('entry-alert-list').innerHTML=unread?table(['Fecha','Colaborador','Producto','Módulo','Cantidad','Saldo','Observaciones'],alerts.map(a=>[
+      dateLabel(a.created_at),a.collaborator,a.barcode?`${a.product} · ${a.barcode}`:a.product,a.module,a.quantity_units,a.stock_after,a.reason||'—'
+    ])):'<p class="small">No hay entradas por revisar.</p>';
+    $('entry-alert-read').hidden=!visibleAlerts.length;
+  }catch(error){
+    if(token===currentToken&&sequence===alertRequest)$('entry-alert-summary').textContent='Entradas de colaboradores · No se pudo actualizar';
+  }
+}
+$('entry-alert-panel').ontoggle=()=>{if($('entry-alert-panel').open)refreshEntryAlerts(false);};
+$('entry-alert-read').onclick=async()=>{
+  if(!visibleAlerts.length)return;
+  const button=$('entry-alert-read');button.disabled=true;
+  try{await post('/admin/entry-alerts/read',{ids:visibleAlerts});await refreshEntryAlerts(false);}
+  catch(error){notice(error.message);}
+  finally{button.disabled=false;}
+};
 function filterProducts(reset=false){
   if(reset)inventoryPage=1;
   const q=$('filter').value.trim().toLowerCase(),location=$('module-filter').value;
   const kind=$('inventory-kind').value,status=$('inventory-status').value,category=$('inventory-category').value;
   const statusMatches={
     active:p=>p.active,inactive:p=>!p.active,unknown:p=>p.stock_units===null,
-    available:p=>p.availability.startsWith('Disponible'),loaned:p=>p.availability==='Prestada'
+    available:p=>p.availability.startsWith('Disponible'),loaned:p=>Number(p.open_loans)>0
   };
   const matches=products.filter(p=>(!location||p.location===location)&&(!kind||p.kind===kind)
     &&(!category||p.category===category)&&(!status||statusMatches[status](p))&&[p.name,p.sap_code,p.barcode,p.location,p.brand,p.model,p.measure,p.capacity,p.category].some(v=>String(v??'').toLowerCase().includes(q)));
@@ -222,7 +260,7 @@ function filterProducts(reset=false){
   const visible=matches.slice(start,start+size),adminView=isAdmin();
   $('product-list').innerHTML=table([...(adminView?['Acción']:[]),'Código de barras','Artículo','SAP','Cantidad','Ubicación','Tipo','Estado','Disponibilidad','Último responsable','Actualización'],
     visible.map(p=>[...(adminView?['']:[]),p.barcode||'—',p.name,p.sap_code||'—',stockLabel(p),
-      p.location_validated?p.location:p.location+' (según registro)',p.kind,p.active?'Activo':'Por validar',p.availability,p.last_worker||'—',dateLabel(p.updated_at)]));
+      p.location_validated?p.location:p.location+' (según registro)',p.kind,p.active?'Activo':'Por validar',inventoryAvailability(p),p.last_worker||'—',dateLabel(p.updated_at)]));
   if(adminView)visible.forEach((product,index)=>{
     const button=document.createElement('button');
     button.type='button';button.textContent='Editar';button.setAttribute('aria-label',`Editar ${product.name}`);
@@ -232,6 +270,11 @@ function filterProducts(reset=false){
   $('inventory-page').textContent=`Página ${inventoryPage} de ${pages} · ${matches.length} referencias`;
   $('inventory-prev').disabled=inventoryPage===1;
   $('inventory-next').disabled=inventoryPage===pages;
+}
+function inventoryAvailability(product){
+  if(!Number(product.open_loans))return product.availability;
+  const loans=`${product.open_loans} en préstamo`;
+  return product.availability==='Prestada'?loans:`${product.availability} · ${loans}`;
 }
 function stockLabel(product){
   if(product.stock_units===null)return 'Sin conteo';
@@ -265,6 +308,7 @@ function movementAllowed(p){
 }
 function showProduct(p){
   const box=$('selected-product-details');
+  $('movement-form').hidden=Boolean(p?.kind==='herramienta');
   $('movement-form').querySelector('button[type=submit]').disabled=movementPending||!movementAllowed(p);
   if(!p){box.hidden=true;box.innerHTML='';return}
   const stock=p.provisional_stock?stockLabel(p):p.stock_units===null?'Sin conteo':`${Number(p.stock_units).toLocaleString('es-CO')} unidades`;
@@ -375,7 +419,7 @@ function canReturn(loan){
 function openReturn(loan){
   if(!canReturn(loan))return;
   returnLoan=loan;
-  $('return-title').textContent='Devolver '+loan.asset_barcode;
+  $('return-title').textContent='Devolver '+loan.product+' · '+loan.asset_barcode;
   $('return-condition').value='Correcta';
   $('return-maintenance').checked=false;
   $('return-maintenance-wrap').hidden=false;
@@ -404,8 +448,8 @@ async function refreshLoans(){
     moduleFilter.innerHTML='<option value="">Todas las ubicaciones</option>'+locations.map(location=>`<option>${escapeHtml(location)}</option>`).join('');
     if(locations.includes(selectedModule))moduleFilter.value=selectedModule;
     showMode(result[3]);
-    $('loans-list').innerHTML='<div class="table-wrap"><table><thead><tr><th>Herramienta</th><th>Prestatario</th><th>Salida</th><th>Vence</th><th>Devolución</th><th>Condición</th><th>Estado actual</th><th>Acción</th></tr></thead><tbody>'+
-      (loans.length?loans.map(l=>`<tr><td>${escapeHtml(l.asset_barcode)}</td><td>${escapeHtml(l.collaborator)}</td><td>${escapeHtml(dateLabel(l.loaned_at))}</td><td>${escapeHtml(dateLabel(l.due_at))}</td><td>${escapeHtml(dateLabel(l.returned_at))}</td><td>${escapeHtml(l.return_condition||'—')}</td><td>${escapeHtml(l.asset_status)}</td><td>${canReturn(l)?`<button type="button" data-return="${l.id}">Devolver</button>`:'—'}</td></tr>`).join(''):'<tr><td colspan="8">No hay préstamos registrados</td></tr>')+'</tbody></table></div>';
+    $('loans-list').innerHTML='<div class="table-wrap"><table><thead><tr><th>Herramienta</th><th>Código individual</th><th>Prestatario</th><th>Salida</th><th>Vence</th><th>Devolución</th><th>Condición</th><th>Estado actual</th><th>Acción</th></tr></thead><tbody>'+
+      (loans.length?loans.map(l=>`<tr><td>${escapeHtml(l.product)}</td><td>${escapeHtml(l.asset_barcode)}</td><td>${escapeHtml(l.collaborator)}</td><td>${escapeHtml(dateLabel(l.loaned_at))}</td><td>${escapeHtml(dateLabel(l.due_at))}</td><td>${escapeHtml(dateLabel(l.returned_at))}</td><td>${escapeHtml(l.return_condition||'—')}</td><td>${escapeHtml(l.asset_status)}</td><td>${canReturn(l)?`<button type="button" data-return="${l.id}">Devolver</button>`:'—'}</td></tr>`).join(''):'<tr><td colspan="9">No hay préstamos registrados</td></tr>')+'</tbody></table></div>';
   }catch(e){if(revision===areaRevision)notice(e.message)}
 }
 function finishScan(dest,code){

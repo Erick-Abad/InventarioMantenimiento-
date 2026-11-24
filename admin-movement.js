@@ -48,7 +48,7 @@ async function registerAdminMovement(pool, movement) {
     }
 
     await connection.query('UPDATE inventory SET stock_units=? WHERE product_id=?', [after, productId]);
-    await connection.query(
+    const [saved] = await connection.query(
       `INSERT INTO movements(product_id,user_id,authorized_by,movement_type,quantity_units,stock_before,stock_after,reason,request_id)
        VALUES(?,?,?,?,?,?,?,?,?)`,
       [productId, userId, adminMovement ? userId : null, type, quantity, before, after, reason || null, requestId]
@@ -64,6 +64,12 @@ async function registerAdminMovement(pool, movement) {
         request_id: requestId
       })]
     );
+    if (!adminMovement && type === 'entrada' && movement.user && movement.user.role !== 'administrador') {
+      await connection.query(
+        'INSERT INTO audit_logs(actor_id,action_name,entity_name,entity_id,details_json) VALUES(?,?,?,?,?)',
+        [userId,'entrada_colaborador','movements',saved.insertId,JSON.stringify({product_id:productId,quantity,after})]
+      );
+    }
     await connection.commit();
     return { before, after };
   } catch (error) {

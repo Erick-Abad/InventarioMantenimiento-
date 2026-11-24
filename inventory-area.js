@@ -88,6 +88,7 @@ async function listAreaProducts(pool, area) {
      SELECT p.id,p.name,p.sap_code,p.barcode,p.kind,p.active,p.units_per_pack,p.notes,p.module_id,
             m.name module,m.inventory_status,i.stock_units,i.original_pack_count,i.min_stock_units,i.last_counted_at,
             (wps.product_id IS NOT NULL) provisional_stock,
+            COALESCE(a.loaned,0) open_loans,
             ${productLocation(workshop)} location,
             ${workshop ? "(pl.id IS NOT NULL OR NULLIF(TRIM(s.location_validated),'') IS NOT NULL)" : '1'} location_validated,
             pd.location_id,pd.measure,pd.specifications,

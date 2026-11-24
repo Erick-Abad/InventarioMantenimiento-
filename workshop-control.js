@@ -46,7 +46,7 @@ function endSession(pool, {sid,id}, reason) {
   return transaction(pool, db => markEnded(db,sid,id,reason));
 }
 
-async function sessionUser(pool, {sid,id}) {
+async function sessionUser(pool, {sid,id}, touch=true) {
   if (typeof sid !== 'string' || sid.length !== 36) return null;
   return transaction(pool, async db => {
     const [[row]] = await db.query(`SELECT u.id,u.full_name name,u.role,u.active,s.ended_at,
@@ -57,7 +57,7 @@ async function sessionUser(pool, {sid,id}) {
       await markEnded(db,sid,id,row.active?'inactividad_o_vencimiento':'cuenta_inactiva');
       return null;
     }
-    await db.query('UPDATE app_sessions SET last_seen=NOW(3) WHERE id=?', [sid]);
+    if(touch)await db.query('UPDATE app_sessions SET last_seen=NOW(3) WHERE id=?', [sid]);
     return {id:row.id,name:row.name,role:row.role};
   });
 }

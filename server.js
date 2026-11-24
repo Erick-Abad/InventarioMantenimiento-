@@ -4,6 +4,7 @@ const {TALLER_ID,invalid,areaCondition,requireArea,requireTallerWorker,listHisto
 const {audit,transaction,idleSeconds,startSession,endSession,sessionUser,getMode,setMode,requireOperator}=require('./workshop-control');
 const {optionalText,locationId,saveDetails,createProduct,catalogStructure,saveModule,saveLocation,importCatalog,excelHeaders}=require('./catalog-admin');
 const {changeAssets,editAsset,barcodeSvg}=require('./asset-admin');
+const {unreadEntries,markEntriesRead}=require('./entry-alerts');
 const app=express();app.disable('x-powered-by');app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'32kb',type:req=>!req.path.startsWith('/api/admin/catalog/import')&&req.is('application/json')}));app.use(express.static(path.join(__dirname,'public')));
 app.use('/vendor/zxing',express.static(path.join(__dirname,'node_modules','@zxing','browser','umd'),{index:false,maxAge:'1d'}));
 const safe=(f)=>(req,res,next)=>Promise.resolve(f(req,res,next)).catch(next);
@@ -13,13 +14,14 @@ function signedSession(req){
  if(!header.startsWith('Bearer '))return null;
  try{return jwt.verify(header.slice(7),process.env.JWT_SECRET,{algorithms:['HS256']})}catch{return null}
 }
-const auth=safe(async(req,res,next)=>{
+const authenticate=(touch=true)=>safe(async(req,res,next)=>{
  const claims=signedSession(req);
- const user=claims&&await sessionUser(pool,claims);
+ const user=claims&&await sessionUser(pool,claims,touch);
  if(!user)return bad(res,'Sesión cerrada. Ingresa nuevamente.',401);
  req.user={...claims,...user};
  next();
 });
+const auth=authenticate();
 const admin=(req,res,next)=>req.user.role==='administrador'?next():bad(res,'Solo administrador.',403);
 const integer=(v)=>Number.isSafeInteger(Number(v))&&Number(v)>0?Number(v):null;
 const uid=()=>crypto.randomUUID();
@@ -146,6 +148,11 @@ app.get('/api/workers',auth,admin,safe(async(req,res)=>{
  res.json(workers);
 }));
 app.get('/api/users',auth,admin,safe(async(req,res)=>{const [rows]=await pool.query('SELECT id,full_name,employee_barcode,role,active FROM users ORDER BY full_name');res.json(rows)}));
+app.get('/api/admin/entry-alerts',authenticate(false),admin,safe(async(req,res)=>res.json(await unreadEntries(pool,req.user.id))));
+app.post('/api/admin/entry-alerts/read',auth,admin,safe(async(req,res)=>{
+ await markEntriesRead(pool,req.user.id,req.body.ids);
+ res.json({ok:true});
+}));
 app.get('/api/admin/audit',auth,admin,safe(async(req,res)=>{
  const before=req.query.before===undefined?null:integer(req.query.before);
  if(req.query.before!==undefined&&!before)return bad(res,'Página de auditoría inválida.');
@@ -241,8 +248,8 @@ function movementRequest(req, adminMovement){
  return {productId:req.body.product_id,userId:req.user.id,quantity:req.body.quantity_units,type:req.body.movement_type,
   reason:req.body.reason,requestId:req.body.request_id,area:req.body.area,user:req.user,adminMovement};
 }
-app.post('/api/movements',auth,admin,safe(async(req,res)=>{
- try{res.json({ok:true,...await registerAdminMovement(pool,movementRequest(req,false))})}
+app.post('/api/movements',auth,safe(async(req,res)=>{
+ try{res.json({ok:true,...await registerAdminMovement(pool,movementRequest(req,req.user.role==='administrador'))})}
  catch(e){if(e.code==='ER_DUP_ENTRY')return bad(res,'Movimiento ya registrado. Actualiza los datos.',409);throw e}
 }));
 app.post('/api/admin/movements',auth,admin,safe(async(req,res)=>{

@@ -138,7 +138,13 @@ test('Taller HTTP workflow requires a physical count and records only verified t
     const selfLoan={...loan,employee_barcode:'EMP-5',request_id:randomUUID()};
     await call('/loans',selfLoan,403);
     await call('/admin/workshop/mode',{mode:'AUTOSERVICIO'},403,'PATCH');
-    await call('/movements',{},403);
+    await call('/movements',{},400);
+    await call('/admin/movements',{},403);
+    await call('/admin/products/1',edit,403,'PATCH');
+    await call('/admin/tools/1',{description:'Cambio por colaborador'},403,'PATCH');
+    await call('/admin/tools',individual,403);
+    await call('/admin/adjust',adjust,403);
+    await call('/admin/entry-alerts',undefined,403,'GET');
     token=adminToken;
     await call('/admin/workshop/mode',{mode:'AUTOSERVICIO'},200,'PATCH');
     token=workerToken;
