@@ -7,7 +7,7 @@ async function listToolAssets(pool, area) {
             p.name,p.sap_code,p.barcode product_barcode,p.kind,p.active,p.module_id,
             m.name module,i.stock_units,i.last_counted_at,(wps.product_id IS NOT NULL) provisional_stock,
             COALESCE(al.name,${productLocation(area==='taller')}) location,tl.location_id,
-            l.loaned_at,l.borrower_id,u.full_name borrower
+            l.loaned_at,l.borrower_id,COALESCE(l.guest_name,u.full_name) borrower
      FROM tool_assets ta
      LEFT JOIN products p ON p.id=ta.product_id
      LEFT JOIN modules m ON m.id=p.module_id

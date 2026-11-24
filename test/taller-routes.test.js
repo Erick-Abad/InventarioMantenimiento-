@@ -53,7 +53,7 @@ test('Taller HTTP workflow requires a physical count and records only verified t
       } else if (sql.startsWith('SELECT id FROM loans WHERE asset_id')) {
         return [loans.filter(loan=>loan.notes===args[1])];
       } else if (sql.startsWith('INSERT INTO loans')) {
-        loans.push({ id:loans.length+1, asset_id:1, borrower_id:args[1], loaned_by:args[2], returned_at:null, notes:args[4], module_id:11 });
+        loans.push({ id:loans.length+1, asset_id:1, borrower_id:args[1], loaned_by:args[2], returned_at:null, notes:args[4], guest_name:args[5], module_id:11 });
         return [{ insertId:loans.length }];
       } else if (sql.includes('SELECT l.id,l.asset_id,l.returned_at')) {
         return [loans.filter(loan=>sql.includes('WHERE l.id=?')?loan.id===args[0]:!loan.returned_at)
@@ -131,11 +131,22 @@ test('Taller HTTP workflow requires a physical count and records only verified t
     await call('/admin/adjust',{...adjust,new_stock_units:1,physical_verification:true},200);
     assert.ok(product.last_counted_at);
     assert.equal(product.provisional_stock,0);
+    assets[0].asset_status='disponible';
+    const guestRequest={...loan,guest_name:'  Persona puntual  ',request_id:randomUUID()};
+    await call('/loans',{...guestRequest,guest_name:'   '},400);
+    await call('/loans',{...guestRequest,borrower_id:4},400);
+    const guestLoan=await call('/loans',guestRequest,200);
+    const guest=loans.find(row=>row.id===guestLoan.id);
+    assert.equal(guest.guest_name,'Persona puntual');
+    assert.equal(guest.borrower_id,null);
+    assert.equal(guest.loaned_by,4);
+    await call('/loans/'+guest.id+'/return',{area:'taller',maintenance:true},200);
     assert.ok(lockedReads>=12);
     const adminToken=token;
     const workerToken=(await call('/login',{user_id:5,password},200)).token;
     token=workerToken;
     const selfLoan={...loan,employee_barcode:'EMP-5',request_id:randomUUID()};
+    await call('/loans',{...selfLoan,guest_name:'Persona puntual'},403);
     await call('/loans',selfLoan,403);
     await call('/admin/workshop/mode',{mode:'AUTOSERVICIO'},403,'PATCH');
     await call('/movements',{},400);

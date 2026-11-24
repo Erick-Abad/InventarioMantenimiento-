@@ -20,7 +20,8 @@ function logout(reason='salida'){
   const previous=token;
   stopCamera();clearTimeout(idleTimer);areaRevision++;searchSequence++;historySequence++;sessionStorage.clear();
   token='';me=null;workshopMode=null;$('app').hidden=true;$('login').hidden=false;$('login-password').value='';$('self-credential').value='';
-  for(const id of ['login-manual-code','login-scan-code','worker-code','loan-notes'])$(id).value='';
+  for(const id of ['login-manual-code','login-scan-code','worker-code','loan-notes','loan-borrower','loan-guest'])$(id).value='';
+  updateGuestBorrower();
   for(const id of ['asset-details','tools-list','loans-list','recent','product-list'])$(id).replaceChildren();
   assets=[];loans=[];products=[];toolReferences=[];pickedTool=null;selectedAssetId=null;
   clearInterval(alertTimer);visibleAlerts=[];previousUnread=0;newestAlert=0;
@@ -114,6 +115,8 @@ function selectArea(next,tab=activeTab==='prestamos'?'prestamos':'inventario'){
   area=next;products=[];assets=[];toolReferences=[];loans=[];selectedAssetId=null;pickedTool=null;inventoryPage=1;toolPage=1;historyPage=1;
   for(const id of ['filter','module-filter','inventory-kind','inventory-category','inventory-status','scan-product','asset-search','tool-module-filter','tool-status-filter','history-worker','history-from','history-to','history-asset','history-module','history-location','movement-reason'])$(id).value='';
   $('worker-code').value='';$('loan-notes').value='';$('self-credential').value='';
+  if($('loan-borrower').value==='guest')$('loan-borrower').value='';
+  updateGuestBorrower();
   $('product-search-results').hidden=true;
   $('movement-type').value='consumo';
   for(const id of ['movement-product','edit-product','adjust-product','asset-product'])$(id).replaceChildren();
@@ -431,6 +434,16 @@ function closeReturn(){
   $('return-form').hidden=true;
   $('return-asset').hidden=true;
 }
+function updateGuestBorrower(){
+  const guest=isAdmin()&&$('loan-borrower').value==='guest';
+  $('loan-guest-wrap').hidden=!guest;
+  $('loan-guest').required=guest;
+  if(!guest)$('loan-guest').value='';
+}
+$('loan-borrower').onchange=()=>{
+  updateGuestBorrower();
+  if($('loan-borrower').value==='guest')$('loan-guest').focus();
+};
 async function refreshLoans(){
   const revision=areaRevision;
   try{
@@ -440,7 +453,9 @@ async function refreshLoans(){
     [assets,loans]=result;
     if(isAdmin()){
       catalog=result[5];
-      setFilterOptions('loan-borrower',result[4].filter(u=>u.active).map(u=>[u.id,u.full_name]),'Mi usuario');
+      const workers=result[4].filter(u=>u.active).map(u=>[u.id,u.full_name]);
+      setFilterOptions('loan-borrower',[...workers,['guest','Otro (préstamo puntual)']],'Mi usuario');
+      updateGuestBorrower();
     }
     toolReferences=ToolAvailability.workshopToolReferences(result[2],assets);
     const moduleFilter=$('tool-module-filter'),selectedModule=moduleFilter.value;
@@ -628,14 +643,24 @@ $('loan-asset').onclick=async()=>{
   const availability=assetAvailability(asset);
   if(!availability.available)return notice(availability.reason);
   if(!isAdmin()){await executeSelfScan(asset.asset_barcode,'loan');return}
-  if(!confirm(`¿Registrar préstamo de ${asset.name}?`))return;
+  const borrower=$('loan-borrower');
+  const guest=borrower.value==='guest';
+  const guestName=$('loan-guest').value.trim();
+  if(guest&&!guestName){$('loan-guest').focus();return notice('Escribe el nombre del prestatario.');}
+  const recipient=guest?guestName:borrower.value?borrower.selectedOptions[0].textContent:me.name;
+  if(!confirm(`¿Registrar préstamo de ${asset.name} a ${recipient}?`))return;
   const revision=areaRevision;
   loanPending=true;
   $('loan-asset').disabled=true;
   try{
-    await scopedPost('/loans',{asset_id:asset.id,request_id:crypto.randomUUID(),notes:$('loan-notes').value,borrower_id:$('loan-borrower').value||null,due_at:$('loan-due').value?new Date($('loan-due').value).toISOString():null});
+    const identity=guest?{guest_name:guestName}:{borrower_id:borrower.value||null};
+    await scopedPost('/loans',{...identity,asset_id:asset.id,request_id:crypto.randomUUID(),notes:$('loan-notes').value,due_at:$('loan-due').value?new Date($('loan-due').value).toISOString():null});
     notice('Préstamo registrado');
-    if(revision===areaRevision){$('loan-notes').value='';await refreshLoans()}
+    if(revision===areaRevision){
+      $('loan-notes').value='';
+      if(guest){borrower.value='';updateGuestBorrower();}
+      await refreshLoans();
+    }
   }catch(ex){notice(ex.message)}
   finally{loanPending=false;renderTools()}
 };

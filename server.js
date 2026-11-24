@@ -29,6 +29,7 @@ const UUID_PATTERN=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 app.get('/api/health',safe(async(req,res)=>{
  await getMode(pool);
  await pool.query('SELECT 1 FROM app_sessions s,product_details p,inventory_locations l,tool_locations t,workshop_provisional_stock w LIMIT 0');
+ await pool.query('SELECT guest_name FROM loans LIMIT 0');
  res.json({ok:true,database:'connected'});
 }));
 app.get('/api/login/users',rateLimit({windowMs:15*60*1000,limit:60,standardHeaders:'draft-7',legacyHeaders:false}),safe(async(req,res)=>{
@@ -137,8 +138,9 @@ app.get('/api/tools',auth,safe(async(req,res)=>{
 app.get('/api/loans',auth,safe(async(req,res)=>{
  const scope=areaCondition(req.query.area);
  const [rows]=await pool.query(`SELECT l.id,l.asset_id,l.loaned_at,l.due_at,l.returned_at,l.borrower_id,
-  u.full_name collaborator,t.asset_barcode,p.name product,t.asset_status,l.return_condition,p.module_id
-  FROM loans l JOIN users u ON u.id=l.borrower_id JOIN tool_assets t ON t.id=l.asset_id JOIN products p ON p.id=t.product_id
+  COALESCE(l.guest_name,u.full_name) collaborator,t.asset_barcode,p.name product,t.asset_status,l.return_condition,p.module_id,
+  (l.guest_name IS NOT NULL) guest
+  FROM loans l LEFT JOIN users u ON u.id=l.borrower_id JOIN tool_assets t ON t.id=l.asset_id JOIN products p ON p.id=t.product_id
   WHERE ${scope} ${req.user.role==='administrador'?'':'AND l.borrower_id=?'}
   ${req.query.area?'ORDER BY l.returned_at IS NULL DESC,l.id DESC':'ORDER BY l.id DESC LIMIT 150'}`,req.user.role==='administrador'?[]:[req.user.id]);
  res.json(rows);
@@ -334,8 +336,8 @@ app.get('/api/admin/tools/:id/label',auth,admin,safe(async(req,res)=>{
 app.get('/api/tools/:id/history',auth,safe(async(req,res)=>{
  const adminView=req.user.role==='administrador';
  const [rows]=await pool.query(`SELECT l.id,l.loaned_at,l.due_at,l.returned_at,l.return_condition,
-   borrower.full_name borrower,issuer.full_name loaned_by,receiver.full_name received_by
-  FROM loans l JOIN users borrower ON borrower.id=l.borrower_id
+   COALESCE(l.guest_name,borrower.full_name) borrower,issuer.full_name loaned_by,receiver.full_name received_by
+  FROM loans l LEFT JOIN users borrower ON borrower.id=l.borrower_id
   JOIN users issuer ON issuer.id=l.loaned_by LEFT JOIN users receiver ON receiver.id=l.received_by
   WHERE l.asset_id=? ${adminView?'':'AND l.borrower_id=?'} ORDER BY l.id DESC LIMIT 200`,
   adminView?[integer(req.params.id)]:[integer(req.params.id),req.user.id]);
@@ -352,6 +354,11 @@ app.post('/api/loans',auth,safe(async(req,res)=>{
  const code=typeof req.body.asset_barcode==='string'?req.body.asset_barcode.trim():'';
  const requestId=String(req.body.request_id||'');
  const due=req.body.due_at==null||req.body.due_at===''?null:new Date(req.body.due_at);
+ const guestRequested=req.body.guest_name!=null;
+ if(guestRequested&&req.user.role!=='administrador')throw invalid('Solo el administrador puede registrar un préstamo puntual.',403);
+ const guestName=guestRequested?optionalText(req.body.guest_name,160,'Nombre del prestatario'):null;
+ if(guestRequested&&(!guestName||req.body.borrower_id!=null))throw invalid('Escribe el nombre del prestatario puntual o elige un usuario de la lista.');
+
  if((!assetId&&!code)||code.length>70||!UUID_PATTERN.test(requestId)||due&&(!Number.isFinite(+due)||due<=new Date()))return bad(res,'Código, solicitud o vencimiento inválido.');
  const id=await transaction(pool,async c=>{
   await requireOperator(c,req.user,req.body.employee_barcode);
@@ -368,7 +375,7 @@ app.post('/api/loans',auth,safe(async(req,res)=>{
   if(open)throw invalid('La herramienta ya tiene un préstamo abierto.',409);
   const [[prior]]=await c.query('SELECT id FROM loans WHERE asset_id=? AND (notes=? OR notes LIKE ?)',[tool.id,'Solicitud '+requestId,'Solicitud '+requestId+' · %']);
   if(prior)throw invalid('Este préstamo ya fue registrado.',409);
-  let borrower=req.user.id;
+  let borrower=guestName?null:req.user.id;
   if(req.user.role==='administrador'&&req.body.borrower_id!=null){
    borrower=integer(req.body.borrower_id);
    const [[recipient]]=await c.query('SELECT id FROM users WHERE id=? AND active=1 FOR SHARE',[borrower]);
@@ -376,9 +383,9 @@ app.post('/api/loans',auth,safe(async(req,res)=>{
   }
   await c.query("UPDATE tool_assets SET asset_status='prestada' WHERE id=?",[tool.id]);
   const notes=String(req.body.notes||'').trim().slice(0,255);
-  const [insert]=await c.query('INSERT INTO loans(asset_id,borrower_id,loaned_by,due_at,notes) VALUES(?,?,?,?,?)',
-   [tool.id,borrower,req.user.id,due,'Solicitud '+requestId+(notes?' · '+notes:'')]);
-  await audit(c,req.user.id,'prestamo','loans',insert.insertId,{asset:tool.id,borrower,due,notes});
+  const [insert]=await c.query('INSERT INTO loans(asset_id,borrower_id,loaned_by,due_at,notes,guest_name) VALUES(?,?,?,?,?,?)',
+   [tool.id,borrower,req.user.id,due,'Solicitud '+requestId+(notes?' · '+notes:''),guestName]);
+  await audit(c,req.user.id,'prestamo','loans',insert.insertId,{asset:tool.id,borrower,guest_name:guestName,due,notes});
   return insert.insertId;
  });
  res.json({ok:true,id});
@@ -412,9 +419,9 @@ app.get('/api/export',auth,admin,safe(async(req,res)=>{const wb=new ExcelJS.Work
   const userId=req.query.user_id===undefined?null:integer(req.query.user_id);
   if(req.query.user_id!==undefined&&!userId)return bad(res,'Trabajador inválido.');
   const [products,moves]=await Promise.all([listAreaProducts(pool,area),listHistory(pool,area,{userId,from:historyDate(req.query.from),to:historyDate(req.query.to),assetBarcode:optionalText(req.query.asset_barcode,70,'Código individual'),location:optionalText(req.query.location,255,'Ubicación'),moduleId:integer(req.query.module_id),limit:2147483647})]);
-  const [loans]=await pool.query(`SELECT l.id,p.name product,t.asset_barcode,u.full_name collaborator,l.loaned_at,
+  const [loans]=await pool.query(`SELECT l.id,p.name product,t.asset_barcode,COALESCE(l.guest_name,u.full_name) collaborator,l.loaned_at,
    l.returned_at,l.return_condition,t.asset_status FROM loans l JOIN tool_assets t ON t.id=l.asset_id JOIN products p ON p.id=t.product_id
-   JOIN users u ON u.id=l.borrower_id WHERE ${areaCondition(area)} ORDER BY l.id DESC`);
+   LEFT JOIN users u ON u.id=l.borrower_id WHERE ${areaCondition(area)} ORDER BY l.id DESC`);
   sheet('Inventario',[['Ubicación','location',32],['Artículo','name',48],['SAP','sap_code',16],['Código de barras','barcode',19],
    ['Tipo','kind',16],['Activo','active',12],['Cantidad','stock_units',14],['Disponible','availability',32],
    ['Último responsable','last_worker',28],['Actualización','updated_at',24],['Mínimo','min_stock_units',13],
@@ -432,7 +439,7 @@ app.get('/api/export',auth,admin,safe(async(req,res)=>{const wb=new ExcelJS.Work
   res.attachment(area==='taller'?'Inventario_Taller.xlsx':'Inventario_Cuarto_Valvulas.xlsx');
   await wb.xlsx.write(res);return res.end();
  }
- const [p]=await pool.query('SELECT m.name module,p.name,p.sap_code,p.barcode,p.kind,p.active,i.stock_units,i.original_pack_count,i.min_stock_units FROM products p JOIN modules m ON m.id=p.module_id JOIN inventory i ON i.product_id=p.id ORDER BY m.id,p.source_row');const [moves]=await pool.query('SELECT mv.id,mv.created_at,mv.movement_type,p.name product,u.full_name collaborator,mv.quantity_units,mv.stock_before,mv.stock_after,mv.reason FROM movements mv JOIN products p ON p.id=mv.product_id JOIN users u ON u.id=mv.user_id ORDER BY mv.created_at DESC LIMIT 10000');const [loans]=await pool.query('SELECT l.id,p.name product,t.asset_barcode,u.full_name collaborator,l.loaned_at,l.returned_at FROM loans l JOIN tool_assets t ON t.id=l.asset_id JOIN products p ON p.id=t.product_id JOIN users u ON u.id=l.borrower_id ORDER BY l.id DESC LIMIT 10000');
+ const [p]=await pool.query('SELECT m.name module,p.name,p.sap_code,p.barcode,p.kind,p.active,i.stock_units,i.original_pack_count,i.min_stock_units FROM products p JOIN modules m ON m.id=p.module_id JOIN inventory i ON i.product_id=p.id ORDER BY m.id,p.source_row');const [moves]=await pool.query('SELECT mv.id,mv.created_at,mv.movement_type,p.name product,u.full_name collaborator,mv.quantity_units,mv.stock_before,mv.stock_after,mv.reason FROM movements mv JOIN products p ON p.id=mv.product_id JOIN users u ON u.id=mv.user_id ORDER BY mv.created_at DESC LIMIT 10000');const [loans]=await pool.query('SELECT l.id,p.name product,t.asset_barcode,COALESCE(l.guest_name,u.full_name) collaborator,l.loaned_at,l.returned_at FROM loans l JOIN tool_assets t ON t.id=l.asset_id JOIN products p ON p.id=t.product_id LEFT JOIN users u ON u.id=l.borrower_id ORDER BY l.id DESC LIMIT 10000');
  sheet('Inventario',[['Modulo','module',18],['Producto','name',42],['SAP','sap_code',16],['Codigo barra','barcode',19],['Tipo','kind',15],['Activo','active',12],['Unidades','stock_units',15],['Paquetes origen','original_pack_count',17],['Minimo','min_stock_units',13]],p);
  sheet('Movimientos',[['ID','id',10],['Fecha','created_at',25],['Tipo','movement_type',20],['Producto','product',42],['Colaborador','collaborator',28],['Cantidad','quantity_units',14],['Antes','stock_before',14],['Despues','stock_after',14],['Motivo','reason',32]],moves);
  sheet('Prestamos',[['ID','id',10],['Producto','product',37],['Herramienta','asset_barcode',20],['Colaborador','collaborator',32],['Fecha salida','loaned_at',25],['Devuelto','returned_at',25]],loans);
